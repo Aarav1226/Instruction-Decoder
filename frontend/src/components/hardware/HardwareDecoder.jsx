@@ -1,12 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import {
-  connectDevice,
-  disconnectDevice,
-  sendInstruction,
-  switchMap,
-  isDeviceReady,
-  isSerialSupported,
-} from '../../device/serial';
+import * as realSerial from '../../device/serial';
+import * as mockSerial from '../../device/mockDevice';
 import {
   CONNECTION_STATES,
   MEMORY_MAPS,
@@ -27,15 +21,37 @@ function createLogEntry(type, message) {
   };
 }
 
+function validateInstruction(raw) {
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return { isValid: false, error: 'Instruction cannot be empty. Enter a 1 to 4 digit hex code (e.g. 1A73).' };
+  }
+  const clean = raw.trim().replace(/^0x/i, '');
+  if (!clean) {
+    return { isValid: false, error: 'Instruction cannot be empty.' };
+  }
+  if (!/^[0-9A-Fa-f]{1,4}$/.test(clean)) {
+    return {
+      isValid: false,
+      error: `Invalid hexadecimal instruction "${raw}". Must be 1 to 4 hex characters (0-9, A-F).`,
+    };
+  }
+  const normalized = clean.toUpperCase().padStart(4, '0');
+  return { isValid: true, normalized };
+}
+
 export default function HardwareDecoder() {
+  const [driverMode, setDriverMode] = useState('real'); // 'real' (Web Serial) | 'mock' (ESP32 Simulator)
+  const activeDriver = driverMode === 'mock' ? mockSerial : realSerial;
+
   const [connectionState, setConnectionState] = useState(
     CONNECTION_STATES.DISCONNECTED
   );
   const [isWaitingReady, setIsWaitingReady] = useState(false);
+  const [isAwaitingResponse, setIsAwaitingResponse] = useState(false);
   const [hexInput, setHexInput] = useState('1A73');
   const [mapMode, setMapMode] = useState(MEMORY_MAPS.DEFAULT);
 
-  // Hardware device result (received via Web Serial JSON from ESP32)
+  // Hardware device result (received via Web Serial JSON from ESP32 - Source of Truth)
   const [deviceResult, setDeviceResult] = useState(null);
 
   // Local Software JS decoder result (strictly implementing sections 3, 4, 5, 6)
@@ -54,7 +70,7 @@ export default function HardwareDecoder() {
     createLogEntry('DECODE', 'Decoded sample 0x1A73 ➔ LOAD R5,[R1+3], EA 0x4013 (RAM)'),
     createLogEntry(
       'CONNECTION',
-      isSerialSupported()
+      realSerial.isSerialSupported()
         ? 'Hardware UI initialized (Web Serial API ready at 115200 baud).'
         : 'Web Serial not supported in this browser. Please use Chrome or Edge.'
     ),
@@ -65,6 +81,8 @@ export default function HardwareDecoder() {
     mapModeRef.current = mapMode;
   }, [mapMode]);
 
+  const awaitingInstrRef = useRef(null);
+  const responseTimeoutRef = useRef(null);
   const logConsoleRef = useRef(null);
 
   const appendLog = useCallback((type, message) => {
@@ -77,7 +95,7 @@ export default function HardwareDecoder() {
   /**
    * Dispatches incoming device messages according to Section 8 of DEVICE_GUIDE.md:
    * 1. {"type":"ready"}
-   * 2. {"type":"decode",...}
+   * 2. {"type":"decode",...} (both host-requested and physical board button decodes)
    * 3. {"type":"map",...}
    */
   const handleDeviceMessage = useCallback(
@@ -87,23 +105,69 @@ export default function HardwareDecoder() {
       if (msg.type === 'ready') {
         setConnectionState(CONNECTION_STATES.CONNECTED);
         setIsWaitingReady(false);
+        setIsAwaitingResponse(false);
+        if (responseTimeoutRef.current) {
+          clearTimeout(responseTimeoutRef.current);
+          responseTimeoutRef.current = null;
+        }
+        awaitingInstrRef.current = null;
         setMetrics((m) => ({ ...m, connections: m.connections + 1 }));
-        appendLog('CONNECTION', 'ESP32 {"type":"ready"} received. Board online & ready!');
+        appendLog('CONNECTION', 'ESP32 {"type":"ready"} handshake received. Board online & ready!');
       } else if (msg.type === 'decode') {
+        // Clear safety timeout & awaiting response flag
+        if (responseTimeoutRef.current) {
+          clearTimeout(responseTimeoutRef.current);
+          responseTimeoutRef.current = null;
+        }
+        const expectedInstr = awaitingInstrRef.current;
+        setIsAwaitingResponse(false);
+        awaitingInstrRef.current = null;
+
+        // Use actual hardware message fields directly:
+        // instr, op, rd, rs, mode, offset, memAccess, ea, region, map, error
+        // Do not independently guess - hardware result is the source of truth!
         const formatted = formatDeviceDecode(msg, mapModeRef.current);
         setDeviceResult(formatted);
-        if (msg.instr) {
-          setHexInput(msg.instr.toUpperCase());
-        }
+
+        // Normalize received instruction from hardware
+        const hwInstr = (msg.instr || '0000').toUpperCase().padStart(4, '0');
+        setHexInput(hwInstr);
+
+        // Synchronize local software reference decoder with this instruction
+        const swResult = decodeInstructionJS(hwInstr, mapModeRef.current);
+        setSoftwareResult(swResult);
+
         setMetrics((m) => ({ ...m, decodes: m.decodes + 1 }));
 
+        // Detect if decode was initiated by physical board buttons (NEXT, INC, DECODE)
+        const isDeviceInitiated = !expectedInstr || expectedInstr !== hwInstr;
+
+        const eaDisplay =
+          msg.memAccess && msg.ea !== null && msg.ea !== undefined
+            ? `0x${(typeof msg.ea === 'number' ? msg.ea : parseInt(msg.ea, 10))
+                .toString(16)
+                .toUpperCase()
+                .padStart(4, '0')} (${msg.ea} dec)`
+            : 'None';
+
         if (msg.error && msg.error.trim().length > 0) {
-          appendLog('ERROR', `ESP32 0x${msg.instr}: ${msg.error}`);
+          if (isDeviceInitiated) {
+            appendLog('ERROR', `[PHYSICAL BOARD] ESP32 0x${hwInstr}: ${msg.error}`);
+          } else {
+            appendLog('ERROR', `[SERIAL RX] ESP32 0x${hwInstr}: ${msg.error}`);
+          }
         } else {
-          appendLog(
-            'DECODE',
-            `ESP32 0x${msg.instr} ➔ ${msg.op}, EA 0x${(msg.ea || 0).toString(16).toUpperCase().padStart(4, '0')} (${msg.region || 'None'})`
-          );
+          if (isDeviceInitiated) {
+            appendLog(
+              'HARDWARE',
+              `[PHYSICAL BOARD] ESP32 0x${hwInstr} ➔ ${msg.op} R${msg.rd}, R${msg.rs} (mode ${msg.mode}), EA ${eaDisplay} [${msg.region || 'None'}]`
+            );
+          } else {
+            appendLog(
+              'DECODE',
+              `[SERIAL RX] ESP32 0x${hwInstr} ➔ ${msg.op} R${msg.rd}, R${msg.rs} (mode ${msg.mode}), EA ${eaDisplay} [${msg.region || 'None'}]`
+            );
+          }
         }
       } else if (msg.type === 'map') {
         const nextMap =
@@ -122,6 +186,12 @@ export default function HardwareDecoder() {
         if (msg.status === 'Disconnected') {
           setConnectionState(CONNECTION_STATES.DISCONNECTED);
           setIsWaitingReady(false);
+          setIsAwaitingResponse(false);
+          awaitingInstrRef.current = null;
+          if (responseTimeoutRef.current) {
+            clearTimeout(responseTimeoutRef.current);
+            responseTimeoutRef.current = null;
+          }
           appendLog('CONNECTION', msg.reason || 'ESP32 disconnected.');
         } else if (msg.status === 'Connecting') {
           appendLog('CONNECTION', msg.reason || 'Connecting...');
@@ -129,6 +199,12 @@ export default function HardwareDecoder() {
       } else if (msg.type === 'error') {
         setConnectionState(CONNECTION_STATES.ERROR);
         setIsWaitingReady(false);
+        setIsAwaitingResponse(false);
+        awaitingInstrRef.current = null;
+        if (responseTimeoutRef.current) {
+          clearTimeout(responseTimeoutRef.current);
+          responseTimeoutRef.current = null;
+        }
         appendLog('ERROR', msg.error || 'Serial error occurred.');
       }
     },
@@ -141,15 +217,21 @@ export default function HardwareDecoder() {
   const handleConnectToggle = async () => {
     if (connectionState === CONNECTION_STATES.CONNECTED || isWaitingReady) {
       appendLog('CONNECTION', 'Closing USB serial connection...');
-      await disconnectDevice();
+      await activeDriver.disconnectDevice();
       setConnectionState(CONNECTION_STATES.DISCONNECTED);
       setIsWaitingReady(false);
+      setIsAwaitingResponse(false);
+      awaitingInstrRef.current = null;
+      if (responseTimeoutRef.current) {
+        clearTimeout(responseTimeoutRef.current);
+        responseTimeoutRef.current = null;
+      }
       setDeviceResult(null);
       appendLog('CONNECTION', 'USB device disconnected.');
       return;
     }
 
-    if (!isSerialSupported()) {
+    if (driverMode === 'real' && !realSerial.isSerialSupported()) {
       setConnectionState(CONNECTION_STATES.ERROR);
       setIsWaitingReady(false);
       appendLog(
@@ -161,14 +243,19 @@ export default function HardwareDecoder() {
 
     setConnectionState(CONNECTION_STATES.CONNECTING);
     setIsWaitingReady(true);
-    appendLog('CONNECTION', 'Requesting USB Serial port (115200 baud)...');
+    appendLog(
+      'CONNECTION',
+      `Requesting USB Serial port (115200 baud) [Driver: ${
+        driverMode === 'mock' ? 'ESP32 Simulator' : 'Web Serial API'
+      }]...`
+    );
 
     try {
-      const opened = await connectDevice(handleDeviceMessage);
+      const opened = await activeDriver.connectDevice(handleDeviceMessage);
       if (opened) {
         appendLog(
           'CONNECTION',
-          'Serial port opened at 115200 baud. Waiting for ESP32 ready handshake...'
+          'Serial port opened at 115200 baud. Waiting for ESP32 {"type":"ready"} handshake...'
         );
       } else {
         setConnectionState(CONNECTION_STATES.DISCONNECTED);
@@ -186,29 +273,55 @@ export default function HardwareDecoder() {
    * Executes decoding both locally via JS decoder and sends to hardware if connected
    */
   const executeDecode = async (code, currentMap) => {
-    const cleanHex = (code || '').replace(/[^0-9a-fA-F]/g, '').slice(0, 4).toUpperCase().padStart(4, '0');
-    setHexInput(cleanHex);
+    if (isAwaitingResponse) return;
 
-    // 1. Run exact JavaScript decoder
-    const swResult = decodeInstructionJS(cleanHex, currentMap);
-    setSoftwareResult(swResult);
+    // 1. Validate instruction
+    const { isValid, normalized, error } = validateInstruction(code);
+    if (!isValid) {
+      appendLog('ERROR', error);
+      return;
+    }
 
-    // 2. If hardware is connected & ready, transmit over Web Serial
-    if (isDeviceReady()) {
+    // 2. Normalize to uppercase 4-digit hexadecimal format
+    setHexInput(normalized);
+
+    // 3. If hardware is connected & ready, transmit over Web Serial
+    if (activeDriver.isDeviceReady()) {
+      setIsAwaitingResponse(true);
+      awaitingInstrRef.current = normalized;
+
+      if (responseTimeoutRef.current) clearTimeout(responseTimeoutRef.current);
+      responseTimeoutRef.current = setTimeout(() => {
+        setIsAwaitingResponse(false);
+        awaitingInstrRef.current = null;
+        appendLog(
+          'ERROR',
+          `Hardware response timeout (5s) for instruction 0x${normalized}. Check serial connection.`
+        );
+      }, 5000);
+
       try {
-        appendLog('DECODE', `Sending 0x${cleanHex}\\n to ESP32 over serial...`);
-        await sendInstruction(cleanHex);
+        appendLog('STREAM', `Sending 0x${normalized}\\n to ESP32 over serial...`);
+        // Send it to the ESP32 followed by a newline
+        await activeDriver.sendInstruction(normalized);
       } catch (err) {
-        appendLog('ERROR', `Failed to send instruction: ${err.message}`);
+        setIsAwaitingResponse(false);
+        awaitingInstrRef.current = null;
+        if (responseTimeoutRef.current) clearTimeout(responseTimeoutRef.current);
+        appendLog('ERROR', `Failed to transmit instruction to ESP32: ${err.message || String(err)}`);
       }
     } else {
+      // Offline fallback: Software decoder
+      const swResult = decodeInstructionJS(normalized, currentMap);
+      setSoftwareResult(swResult);
       setMetrics((m) => ({ ...m, decodes: m.decodes + 1 }));
+
       if (swResult.error) {
-        appendLog('ERROR', `0x${cleanHex}: ${swResult.error}`);
+        appendLog('ERROR', `Software 0x${normalized}: ${swResult.error}`);
       } else {
         appendLog(
           'DECODE',
-          `Software Decoded 0x${cleanHex} ➔ ${swResult.op}, EA ${swResult.effectiveAddressHex} (${swResult.region || 'None'})`
+          `Software Decoded 0x${normalized} ➔ ${swResult.op}, EA ${swResult.effectiveAddressHex} (${swResult.region || 'None'})`
         );
       }
     }
@@ -222,6 +335,7 @@ export default function HardwareDecoder() {
    * Interactive Bit Toggle (15 down to 0)
    */
   const handleBitToggle = (bitIndex) => {
+    if (isAwaitingResponse) return;
     const currentVal =
       parseInt(hexInput.replace(/[^0-9a-fA-F]/g, '') || '0', 16) & 0xffff;
     const nextVal = (currentVal ^ (1 << bitIndex)) & 0xffff;
@@ -235,10 +349,10 @@ export default function HardwareDecoder() {
   const handleMapToggle = async (targetMap) => {
     if (targetMap === mapMode) return;
 
-    if (isDeviceReady()) {
+    if (activeDriver.isDeviceReady()) {
       try {
         appendLog('MAP', 'Sending "map\\n" command to ESP32...');
-        await switchMap();
+        await activeDriver.switchMap();
       } catch (err) {
         appendLog('ERROR', `Failed to switch map on device: ${err.message}`);
       }
@@ -252,6 +366,22 @@ export default function HardwareDecoder() {
           targetMap === MEMORY_MAPS.DEFAULT ? 'Default Map' : 'Overlap Map (0x7000–0x7FFF)'
         }`
       );
+    }
+  };
+
+  /**
+   * Simulates pressing physical pushbuttons on the ESP32 board
+   */
+  const handleSimulatePhysicalButton = (btnType) => {
+    if (!activeDriver.isDeviceReady()) {
+      appendLog('WARNING', 'ESP32 simulator must be connected to simulate physical buttons.');
+      return;
+    }
+    try {
+      appendLog('HARDWARE', `[PHYSICAL BOARD] Pressed ESP32 onboard '${btnType}' tactile pushbutton.`);
+      mockSerial.simulatePhysicalButton(btnType);
+    } catch (err) {
+      appendLog('ERROR', `Physical button simulation failed: ${err.message}`);
     }
   };
 
@@ -274,9 +404,12 @@ export default function HardwareDecoder() {
 
   useEffect(() => {
     return () => {
-      disconnectDevice().catch(() => {});
+      if (responseTimeoutRef.current) {
+        clearTimeout(responseTimeoutRef.current);
+      }
+      activeDriver.disconnectDevice().catch(() => {});
     };
-  }, []);
+  }, [activeDriver]);
 
   // Primary active result to display: deviceResult if hardware connected, otherwise softwareResult
   const isHwConnected = connectionState === CONNECTION_STATES.CONNECTED && !isWaitingReady;
@@ -377,6 +510,36 @@ export default function HardwareDecoder() {
               </div>
             </div>
 
+            {/* Driver Selector: Web Serial vs Simulator */}
+            <div className="hidden sm:flex items-center gap-1 bg-white/70 p-1 rounded-xl border border-brand-sand/40 shadow-sm">
+              <button
+                type="button"
+                disabled={isHwConnected || isConnecting || isWaitingReady}
+                onClick={() => setDriverMode('real')}
+                className={`px-2.5 py-1 font-mono text-[10px] font-bold rounded-lg transition-all ${
+                  driverMode === 'real'
+                    ? 'bg-brand-dark text-white shadow-sm'
+                    : 'text-brand-taupe hover:text-brand-dark'
+                } ${isHwConnected || isConnecting || isWaitingReady ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title="Connect to physical ESP32 via Chrome/Edge Web Serial API at 115200 baud"
+              >
+                USB Web Serial
+              </button>
+              <button
+                type="button"
+                disabled={isHwConnected || isConnecting || isWaitingReady}
+                onClick={() => setDriverMode('mock')}
+                className={`px-2.5 py-1 font-mono text-[10px] font-bold rounded-lg transition-all ${
+                  driverMode === 'mock'
+                    ? 'bg-brand-dark text-white shadow-sm'
+                    : 'text-brand-taupe hover:text-brand-dark'
+                } ${isHwConnected || isConnecting || isWaitingReady ? 'opacity-50 cursor-not-allowed' : ''}`}
+                title="Simulate ESP32 device with physical button testing (NEXT / INC / DECODE)"
+              >
+                ESP32 Simulator
+              </button>
+            </div>
+
             {/* Section 12: Connect Device button & Hardware connected badge */}
             <div className="flex items-center gap-3 glass-card-inner px-3 py-1.5 rounded-xl shadow-sm">
               <div className="flex flex-col text-right">
@@ -407,7 +570,7 @@ export default function HardwareDecoder() {
                   </span>
                 </div>
                 <span className="font-mono text-[11px] text-brand-taupe">
-                  ESP32-WROOM · 115200
+                  {driverMode === 'mock' ? 'SIMULATED ESP32' : 'ESP32-WROOM · 115200'}
                 </span>
               </div>
               <button
@@ -432,9 +595,11 @@ export default function HardwareDecoder() {
                       ? 'Disconnect'
                       : isError
                         ? 'Retry USB'
-                        : 'Connect USB'}
+                        : driverMode === 'mock'
+                          ? 'Start Mock'
+                          : 'Connect USB'}
                 <span className="font-mono text-[9px] px-1 py-0.5 bg-white/20 text-white rounded">
-                  WEB-SERIAL
+                  {driverMode === 'mock' ? 'MOCK' : 'WEB-SERIAL'}
                 </span>
               </button>
             </div>
@@ -469,7 +634,13 @@ export default function HardwareDecoder() {
                   DECODER SOURCE:
                 </span>
                 <span className="font-mono text-xs text-brand-dark font-bold tracking-wider">
-                  {isHwConnected ? 'ESP32 HARDWARE VIA USB SERIAL' : 'JAVASCRIPT CORE (DEVICE_GUIDE.MD)'}
+                  {isAwaitingResponse
+                    ? 'TX ➔ AWAITING ESP32 RESPONSE'
+                    : isHwConnected
+                      ? driverMode === 'mock'
+                        ? 'ESP32 SIMULATOR (VIRTUAL SERIAL)'
+                        : 'ESP32 HARDWARE VIA USB SERIAL'
+                      : 'JAVASCRIPT CORE (DEVICE_GUIDE.MD)'}
                 </span>
               </div>
 
@@ -677,12 +848,27 @@ export default function HardwareDecoder() {
                   </div>
                   <button
                     id="decodeBtn"
-                    className="flex items-center gap-2 bg-brand-dark text-brand-cream hover:bg-brand-deep hover:text-white px-5 py-2.5 rounded-xl font-mono text-xs font-bold uppercase tracking-wider transition-all shadow-md active:translate-y-0.5"
+                    disabled={isAwaitingResponse}
+                    className={`flex items-center gap-2 ${
+                      isAwaitingResponse
+                        ? 'bg-amber-600 text-white cursor-wait opacity-85'
+                        : 'bg-brand-dark text-brand-cream hover:bg-brand-deep hover:text-white'
+                    } px-5 py-2.5 rounded-xl font-mono text-xs font-bold uppercase tracking-wider transition-all shadow-md active:translate-y-0.5`}
                     type="button"
                     onClick={handleDecodeClick}
                   >
-                    <span className="material-symbols-outlined text-[16px]">play_circle</span>
-                    {isHwConnected ? 'Decode (ESP32)' : 'Decode'}
+                    <span
+                      className={`material-symbols-outlined text-[16px] ${
+                        isAwaitingResponse ? 'animate-spin' : ''
+                      }`}
+                    >
+                      {isAwaitingResponse ? 'sync' : 'play_circle'}
+                    </span>
+                    {isAwaitingResponse
+                      ? 'Awaiting ESP32...'
+                      : isHwConnected
+                        ? 'Decode (ESP32)'
+                        : 'Decode'}
                   </button>
                 </div>
 
@@ -726,6 +912,50 @@ export default function HardwareDecoder() {
                   ))}
                 </div>
               </div>
+
+              {/* Section 1 & 10: ESP32 Physical Board Buttons Simulation */}
+              {isHwConnected && driverMode === 'mock' && (
+                <div className="glass-card-inner p-3 rounded-xl flex flex-wrap items-center justify-between gap-3 bg-amber-500/10 border border-amber-500/30 shadow-sm">
+                  <div className="flex items-center gap-2">
+                    <span className="material-symbols-outlined text-amber-700 text-[18px]">touch_app</span>
+                    <span className="font-mono text-xs font-bold text-amber-950 uppercase tracking-wide">
+                      ESP32 TACTILE BUTTONS SIMULATION:
+                    </span>
+                    <span className="font-mono text-[11px] text-amber-800 hidden md:inline">
+                      Simulate pressing hardware buttons (NEXT, INC, DECODE pushbuttons on the board)
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isAwaitingResponse}
+                      onClick={() => handleSimulatePhysicalButton('NEXT')}
+                      className="px-3 py-1.5 rounded-lg bg-white hover:bg-amber-100 text-brand-dark font-mono text-xs font-bold border border-amber-300 shadow-sm active:translate-y-0.5 transition-colors disabled:opacity-50"
+                      title="Simulate pressing NEXT button on ESP32 to cycle official test cases"
+                    >
+                      NEXT (Cycle Test)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isAwaitingResponse}
+                      onClick={() => handleSimulatePhysicalButton('INC')}
+                      className="px-3 py-1.5 rounded-lg bg-white hover:bg-amber-100 text-brand-dark font-mono text-xs font-bold border border-amber-300 shadow-sm active:translate-y-0.5 transition-colors disabled:opacity-50"
+                      title="Simulate pressing INC button on ESP32 to increment instruction"
+                    >
+                      INC (+1 Instr)
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isAwaitingResponse}
+                      onClick={() => handleSimulatePhysicalButton('DECODE')}
+                      className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-mono text-xs font-bold shadow-sm active:translate-y-0.5 transition-colors disabled:opacity-50"
+                      title="Simulate pressing DECODE button on ESP32 to re-decode"
+                    >
+                      DECODE (Board Push)
+                    </button>
+                  </div>
+                </div>
+              )}
 
               {/* 16-Bit Architecture Sub-Field Partition Badges (Section 3) */}
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">

@@ -196,7 +196,7 @@ export async function sendInstruction(hex) {
   if (!activePort || !streamWriter) {
     throw new Error('No serial port is currently open.');
   }
-  const cleanHex = String(hex || '').trim().replace(/^0x/i, '').toUpperCase();
+  const cleanHex = String(hex || '').trim().replace(/^0x/i, '').toUpperCase().padStart(4, '0');
   await streamWriter.write(new TextEncoder().encode(cleanHex + '\n'));
   return cleanHex;
 }
