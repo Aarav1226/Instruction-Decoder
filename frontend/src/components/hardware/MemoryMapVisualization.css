@@ -1,0 +1,565 @@
+/* ── MemoryMapVisualization Component Styles ────────────────────────── */
+
+.mm-visualizer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: 100%;
+}
+
+.mm-mono {
+  font-family: var(--mono, ui-monospace, Consolas, monospace);
+}
+
+/* Telemetry Summary Bar */
+.mm-telemetry-bar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  background: var(--code-bg, #f4f3ec);
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+
+.mm-telemetry-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mm-telemetry-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text, #6b6375);
+}
+
+.mm-telemetry-value {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-h, #08060d);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.mm-hex-value {
+  color: var(--accent, #aa3bff);
+}
+
+.mm-dec-value {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text, #6b6375);
+}
+
+.mm-muted {
+  color: var(--text, #6b6375);
+  font-style: italic;
+  font-weight: 400;
+}
+
+.mm-badge-conflict {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: rgba(239, 68, 68, 0.15);
+  border: 1px solid rgba(239, 68, 68, 0.45);
+  color: #ef4444;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  animation: mmPulseRed 1.8s ease-in-out infinite;
+}
+
+.mm-badge-region {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.mm-region-blue {
+  background: rgba(59, 130, 246, 0.16);
+  color: #2563eb;
+  border: 1px solid rgba(59, 130, 246, 0.35);
+}
+
+.mm-region-green {
+  background: rgba(16, 185, 129, 0.16);
+  color: #059669;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.mm-region-yellow {
+  background: rgba(245, 158, 11, 0.16);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.mm-region-muted {
+  background: rgba(107, 114, 128, 0.16);
+  color: #6b7280;
+  border: 1px solid rgba(107, 114, 128, 0.35);
+}
+
+.mm-map-chip {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 3px 8px;
+  border-radius: 4px;
+}
+
+.mm-map-chip.is-default {
+  background: rgba(59, 130, 246, 0.12);
+  color: #3b82f6;
+  border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+.mm-map-chip.is-overlap {
+  background: rgba(245, 158, 11, 0.15);
+  color: #d97706;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+/* Overlap Banner */
+.mm-overlap-banner {
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  line-height: 1.45;
+  transition: all 0.25s ease;
+}
+
+.mm-overlap-banner.is-info {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  color: var(--text-h, #08060d);
+}
+
+.mm-overlap-banner.is-triggered {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.55);
+  color: #b91c1c;
+  animation: mmAlertPulse 2s infinite ease-in-out;
+}
+
+.mm-banner-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.mm-banner-body {
+  margin: 0;
+  font-size: 12px;
+}
+
+/* Memory Track Graphic Container */
+.mm-track-container {
+  position: relative;
+  padding-top: 36px;
+  padding-bottom: 8px;
+}
+
+.mm-scale-markers {
+  position: absolute;
+  top: 10px;
+  left: 0;
+  right: 0;
+  height: 20px;
+  pointer-events: none;
+}
+
+.mm-scale-tick {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text, #6b6375);
+  white-space: nowrap;
+}
+
+/* Proportional Memory Track */
+.mm-track {
+  position: relative;
+  height: 64px;
+  background: var(--code-bg, #f4f3ec);
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 8px;
+  overflow: visible;
+  display: flex;
+}
+
+.mm-region-block {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  padding: 4px 6px;
+  border-right: 1px solid var(--border, #e5e4e7);
+  border-radius: 6px;
+  opacity: 0.82;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+  user-select: none;
+}
+
+.mm-region-block:hover {
+  opacity: 0.95;
+  z-index: 2;
+}
+
+.mm-region-block.is-targeted {
+  opacity: 1;
+  z-index: 3;
+  box-shadow: inset 0 0 0 2px var(--accent, #aa3bff), 0 2px 10px rgba(0, 0, 0, 0.12);
+}
+
+.mm-region-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  text-align: center;
+  width: 100%;
+}
+
+.mm-region-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-h, #08060d);
+  letter-spacing: 0.02em;
+}
+
+.mm-region-bounds {
+  font-size: 10px;
+  color: var(--text, #6b6375);
+  font-weight: 500;
+}
+
+.mm-region-perm {
+  font-size: 9px;
+  font-weight: 600;
+  color: var(--text, #6b6375);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.85;
+}
+
+/* Region Colors */
+.mm-color-blue {
+  background-color: rgba(59, 130, 246, 0.22);
+  border-color: rgba(59, 130, 246, 0.4);
+}
+
+.mm-color-green {
+  background-color: rgba(16, 185, 129, 0.22);
+  border-color: rgba(16, 185, 129, 0.4);
+}
+
+.mm-color-yellow {
+  background-color: rgba(245, 158, 11, 0.22);
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.mm-color-muted {
+  background-color: rgba(107, 114, 128, 0.16);
+  border-color: rgba(107, 114, 128, 0.3);
+}
+
+/* Overlap Visual Slice */
+.mm-overlap-slice {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  pointer-events: none;
+  z-index: 4;
+  border: 1px dashed rgba(245, 158, 11, 0.75);
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(245, 158, 11, 0.15),
+    rgba(245, 158, 11, 0.15) 8px,
+    rgba(245, 158, 11, 0.3) 8px,
+    rgba(245, 158, 11, 0.3) 16px
+  );
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.mm-overlap-slice.is-conflict {
+  border-color: #ef4444;
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(239, 68, 68, 0.2),
+    rgba(239, 68, 68, 0.2) 8px,
+    rgba(239, 68, 68, 0.45) 8px,
+    rgba(239, 68, 68, 0.45) 16px
+  );
+  animation: mmStripeScroll 1s linear infinite;
+}
+
+.mm-overlap-badge {
+  background: rgba(245, 158, 11, 0.9);
+  padding: 1px 6px;
+  border-radius: 3px 3px 0 0;
+  transform: translateY(1px);
+}
+
+.mm-overlap-slice.is-conflict .mm-overlap-badge {
+  background: #ef4444;
+}
+
+.mm-overlap-badge-text {
+  font-size: 8px;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+/* Effective Address Animated Pointer */
+.mm-ea-pointer {
+  position: absolute;
+  top: -24px;
+  bottom: -4px;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  z-index: 6;
+  pointer-events: none;
+  transition: left 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.mm-ea-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  background: var(--accent, #aa3bff);
+  color: #ffffff;
+  padding: 2px 7px;
+  border-radius: 5px;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+  animation: mmPointerFloat 2s ease-in-out infinite alternate;
+}
+
+.mm-ea-badge-hex {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.1;
+}
+
+.mm-ea-badge-dec {
+  font-size: 9px;
+  opacity: 0.88;
+}
+
+.mm-ea-needle {
+  width: 2px;
+  flex: 1;
+  background: var(--accent, #aa3bff);
+  box-shadow: 0 0 4px rgba(170, 59, 255, 0.6);
+}
+
+.mm-ea-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent, #aa3bff);
+  box-shadow: 0 0 8px 1px rgba(170, 59, 255, 0.75);
+}
+
+.mm-ea-pointer.is-conflict .mm-ea-badge {
+  background: #ef4444;
+  animation: mmPointerJitter 0.3s ease-in-out infinite alternate;
+}
+
+.mm-ea-pointer.is-conflict .mm-ea-needle,
+.mm-ea-pointer.is-conflict .mm-ea-dot {
+  background: #ef4444;
+  box-shadow: 0 0 8px 1px rgba(239, 68, 68, 0.85);
+}
+
+/* Legend & Details Grid */
+.mm-legend-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.mm-legend-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px;
+  background: var(--code-bg, #f4f3ec);
+  border: 1px solid var(--border, #e5e4e7);
+  border-radius: 8px;
+  transition: all 0.2s ease;
+}
+
+.mm-legend-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.05);
+}
+
+.mm-legend-card.is-active-card {
+  border-color: var(--accent, #aa3bff);
+  background: var(--accent-bg, rgba(170, 59, 255, 0.08));
+  box-shadow: 0 0 0 1px var(--accent, #aa3bff);
+}
+
+.mm-card-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mm-card-color-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+
+.mm-bg-blue {
+  background: #3b82f6;
+}
+.mm-bg-green {
+  background: #10b981;
+}
+.mm-bg-yellow {
+  background: #f59e0b;
+}
+.mm-bg-muted {
+  background: #6b7280;
+}
+
+.mm-card-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text-h, #08060d);
+  flex: 1;
+}
+
+.mm-card-size {
+  font-size: 10px;
+  color: var(--text, #6b6375);
+}
+
+.mm-card-range {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-h, #08060d);
+}
+
+.mm-card-perm {
+  margin-top: 2px;
+}
+
+.mm-perm-tag {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.05);
+  color: var(--text, #6b6375);
+}
+
+.mm-card-desc {
+  margin: 4px 0 0;
+  font-size: 11px;
+  color: var(--text, #6b6375);
+  line-height: 1.35;
+}
+
+/* Animations */
+@keyframes mmPulseRed {
+  0%, 100% {
+    opacity: 0.8;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.04);
+  }
+}
+
+@keyframes mmAlertPulse {
+  0%, 100% {
+    border-color: rgba(239, 68, 68, 0.55);
+  }
+  50% {
+    border-color: rgba(239, 68, 68, 0.9);
+  }
+}
+
+@keyframes mmPointerFloat {
+  0% {
+    transform: translateY(0);
+  }
+  100% {
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes mmPointerJitter {
+  0% {
+    transform: translateY(0) rotate(-1deg);
+  }
+  100% {
+    transform: translateY(-2px) rotate(1deg);
+  }
+}
+
+@keyframes mmStripeScroll {
+  0% {
+    background-position: 0 0;
+  }
+  100% {
+    background-position: 16px 0;
+  }
+}
+
+/* Responsive Rules */
+@media (max-width: 960px) {
+  .mm-telemetry-bar {
+    grid-template-columns: 1fr;
+  }
+  .mm-legend-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .mm-track {
+    height: 72px;
+  }
+}
+
+@media (max-width: 600px) {
+  .mm-legend-grid {
+    grid-template-columns: 1fr;
+  }
+  .mm-region-perm {
+    display: none;
+  }
+  .mm-region-bounds {
+    font-size: 9px;
+  }
+}
