@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import * as realSerial from '../../device/serial';
 import * as mockSerial from '../../device/mockDevice';
 import {
@@ -6,9 +6,12 @@ import {
   MEMORY_MAPS,
   decodeInstructionJS,
   formatDeviceDecode,
+  compareDecoderResults,
   OFFICIAL_TEST_CASES,
   FIXED_REGISTERS,
 } from './hardwareUtils';
+import ComparisonCard from './ComparisonCard';
+import HardwareLedPanel from './HardwareLedPanel';
 
 function createLogEntry(type, message) {
   const now = new Date();
@@ -415,14 +418,12 @@ export default function HardwareDecoder() {
   const isHwConnected = connectionState === CONNECTION_STATES.CONNECTED && !isWaitingReady;
   const activeResult = isHwConnected && deviceResult ? deviceResult : softwareResult;
 
-  // Section 12: Check whether hardware and software results match side by side
-  const resultsMatch =
-    isHwConnected && deviceResult
-      ? deviceResult.op === softwareResult.op &&
-        deviceResult.ea === softwareResult.ea &&
-        deviceResult.region === softwareResult.region &&
-        deviceResult.error === softwareResult.error
-      : null;
+  // 11-point architectural comparison between Software and Hardware decoders
+  const comparison = useMemo(() => {
+    return compareDecoderResults(softwareResult, deviceResult, isHwConnected);
+  }, [softwareResult, deviceResult, isHwConnected]);
+
+  const resultsMatch = comparison?.isMatch;
 
   // 16-bit fields
   const intVal =
@@ -476,18 +477,34 @@ export default function HardwareDecoder() {
               </div>
             </div>
             <nav className="hidden xl:flex items-center gap-1.5 p-1.5 bg-brand-sand/30 rounded-xl border border-white/60">
-              <span className="px-3.5 py-1.5 font-mono text-xs uppercase tracking-wider font-bold rounded-lg shadow-sm bg-white/90 text-brand-dark border border-white cursor-default">
+              <button
+                type="button"
+                onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+                className="px-3 py-1 font-mono text-xs uppercase tracking-wider font-bold rounded-lg shadow-sm bg-white/90 text-brand-dark border border-white cursor-pointer transition-all"
+              >
                 Live Decoder
-              </span>
-              <span className="px-3.5 py-1.5 font-mono text-xs uppercase tracking-wider text-brand-deep hover:text-brand-dark hover:bg-white/50 transition-all rounded-lg cursor-pointer">
-                Register Heap
-              </span>
-              <span className="px-3.5 py-1.5 font-mono text-xs uppercase tracking-wider text-brand-deep hover:text-brand-dark hover:bg-white/50 transition-all rounded-lg cursor-pointer">
-                Logic Trace
-              </span>
-              <span className="px-3.5 py-1.5 font-mono text-xs uppercase tracking-wider text-brand-deep hover:text-brand-dark hover:bg-white/50 transition-all rounded-lg cursor-pointer">
-                ROM Map
-              </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => document.getElementById('comparison-section')?.scrollIntoView({ behavior: 'smooth' })}
+                className="px-3 py-1 font-mono text-xs uppercase tracking-wider text-brand-deep hover:text-brand-dark hover:bg-white/50 transition-all rounded-lg cursor-pointer"
+              >
+                HW vs SW Comparison
+              </button>
+              <button
+                type="button"
+                onClick={() => document.getElementById('memory-map-section')?.scrollIntoView({ behavior: 'smooth' })}
+                className="px-3 py-1 font-mono text-xs uppercase tracking-wider text-brand-deep hover:text-brand-dark hover:bg-white/50 transition-all rounded-lg cursor-pointer"
+              >
+                Memory Map
+              </button>
+              <button
+                type="button"
+                onClick={() => document.getElementById('activity-log-section')?.scrollIntoView({ behavior: 'smooth' })}
+                className="px-3 py-1 font-mono text-xs uppercase tracking-wider text-brand-deep hover:text-brand-dark hover:bg-white/50 transition-all rounded-lg cursor-pointer"
+              >
+                Activity Log
+              </button>
             </nav>
           </div>
 
@@ -508,6 +525,15 @@ export default function HardwareDecoder() {
                 <span className="font-mono text-[10px] font-bold text-brand-taupe uppercase">BAUD</span>
                 <span className="font-mono text-xs text-brand-deep font-bold">115200</span>
               </div>
+              {/* Comparison match status indicator */}
+              {isHwConnected && resultsMatch !== null && (
+                <div className={`flex items-center gap-1 px-2 py-1 rounded-lg ${resultsMatch ? 'bg-emerald-100/80' : 'bg-rose-100/80'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${resultsMatch ? 'bg-emerald-500' : 'bg-rose-500'}`} />
+                  <span className={`font-mono text-[10px] font-bold uppercase ${resultsMatch ? 'text-emerald-700' : 'text-rose-700'}`}>
+                    {resultsMatch ? 'MATCH' : 'DIFF'}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Driver Selector: Web Serial vs Simulator */}
@@ -610,188 +636,18 @@ export default function HardwareDecoder() {
       {/* MAIN VIEWPORT */}
       <main className="w-full pt-28 pb-12 flex-1 flex flex-col">
         <div className="w-full max-w-[1680px] mx-auto px-4 md:px-8 flex flex-col gap-5 text-brand-dark">
-          {/* 1. TOP HARDWARE TELEMETRY & PHYSICAL LED INDICATORS STRIP (Section 2) */}
-          <section className="w-full glass-panel rounded-2xl p-4 md:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative overflow-hidden">
-            <div className="absolute -right-16 -top-16 w-64 h-64 rounded-full bg-brand-slate/20 blur-3xl pointer-events-none" />
-
-            {/* Left: Hardware Spec Chips */}
-            <div className="flex flex-wrap items-center gap-3 z-10">
-              <div className="flex items-center gap-3 glass-card-inner px-3.5 py-1.5 rounded-xl shadow-sm">
-                <div className="w-3 h-3 rounded-full bg-brand-slate shadow-[0_0_8px_rgba(183,196,207,0.9)]" />
-                <div className="flex flex-col">
-                  <span className="font-mono text-[10px] text-brand-taupe font-bold uppercase tracking-wider">
-                    HARDWARE CORE
-                  </span>
-                  <span className="font-mono text-xs md:text-sm text-brand-dark font-extrabold tracking-wide">
-                    ESP32-WROOM-32D (OLED + 5 LEDs)
-                  </span>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2 glass-card-inner px-3 py-2 rounded-xl">
-                <span className="material-symbols-outlined text-[16px] text-brand-taupe">schema</span>
-                <span className="font-mono text-[10px] text-brand-taupe uppercase font-semibold">
-                  DECODER SOURCE:
-                </span>
-                <span className="font-mono text-xs text-brand-dark font-bold tracking-wider">
-                  {isAwaitingResponse
-                    ? 'TX ➔ AWAITING ESP32 RESPONSE'
-                    : isHwConnected
-                      ? driverMode === 'mock'
-                        ? 'ESP32 SIMULATOR (VIRTUAL SERIAL)'
-                        : 'ESP32 HARDWARE VIA USB SERIAL'
-                      : 'JAVASCRIPT CORE (DEVICE_GUIDE.MD)'}
-                </span>
-              </div>
-
-              {/* Section 12: Match / Mismatch Indicator */}
-              {isHwConnected && resultsMatch !== null && (
-                <div
-                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border font-mono text-xs font-bold uppercase ${
-                    resultsMatch
-                      ? 'bg-emerald-100/90 text-emerald-800 border-emerald-400'
-                      : 'bg-rose-100/90 text-rose-800 border-rose-400 animate-pulse'
-                  }`}
-                >
-                  <span className="material-symbols-outlined text-[16px]">
-                    {resultsMatch ? 'check_circle' : 'cancel'}
-                  </span>
-                  <span>{resultsMatch ? '✓ HW & SW MATCH' : '✗ HW/SW MISMATCH'}</span>
-                </div>
-              )}
-            </div>
-
-            {/* Right: Active Bus LED Indicators Array (Section 2 & 11) */}
-            <div className="flex flex-wrap items-center gap-2.5 z-10">
-              {/* Blue: ROM */}
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  activeLeds.blue
-                    ? 'bg-blue-100/80 border border-blue-400/90 shadow-[0_0_10px_rgba(59,130,246,0.5)]'
-                    : 'glass-card-inner opacity-50'
-                }`}
-                title="Blue LED: Address is in ROM (0x0000–0x3FFF)"
-              >
-                <span className="relative flex h-2.5 w-2.5">
-                  {activeLeds.blue && (
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                  )}
-                  <span
-                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      activeLeds.blue
-                        ? 'bg-blue-600 shadow-[0_0_6px_rgba(37,99,235,0.8)]'
-                        : 'bg-brand-sand'
-                    }`}
-                  />
-                </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">BLUE: ROM</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
-                  L-01
-                </span>
-              </div>
-
-              {/* Green: RAM */}
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  activeLeds.green
-                    ? 'bg-emerald-100/80 border border-emerald-400/90 shadow-[0_0_10px_rgba(16,185,129,0.5)]'
-                    : 'glass-card-inner opacity-50'
-                }`}
-                title="Green LED: Address is in RAM (0x4000–0x7FFF)"
-              >
-                <span className="relative flex h-2.5 w-2.5">
-                  {activeLeds.green && (
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
-                  )}
-                  <span
-                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      activeLeds.green
-                        ? 'bg-emerald-600 shadow-[0_0_6px_rgba(5,150,105,0.8)]'
-                        : 'bg-brand-sand'
-                    }`}
-                  />
-                </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">GREEN: RAM</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
-                  L-02
-                </span>
-              </div>
-
-              {/* Yellow: I/O */}
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  activeLeds.yellow
-                    ? 'bg-amber-100/80 border border-amber-400/90 shadow-[0_0_10px_rgba(245,158,11,0.5)]'
-                    : 'glass-card-inner opacity-50'
-                }`}
-                title="Yellow LED: Address is in I/O (0x8000–0x9FFF or 0x7000–0x9FFF)"
-              >
-                <span className="relative flex h-2.5 w-2.5">
-                  {activeLeds.yellow && (
-                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
-                  )}
-                  <span
-                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      activeLeds.yellow
-                        ? 'bg-amber-600 shadow-[0_0_6px_rgba(217,119,6,0.8)]'
-                        : 'bg-brand-sand'
-                    }`}
-                  />
-                </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">YELLOW: I/O</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
-                  L-03
-                </span>
-              </div>
-
-              {/* White: Immediate / No Mem */}
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  activeLeds.white
-                    ? 'bg-white/95 border border-slate-300 shadow-[0_0_10px_rgba(255,255,255,1)]'
-                    : 'glass-card-inner opacity-50'
-                }`}
-                title="White LED: Valid instruction with no memory access (Immediate mode)"
-              >
-                <span className="relative flex h-2.5 w-2.5">
-                  <span
-                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      activeLeds.white ? 'bg-white border border-slate-400 shadow-sm' : 'bg-brand-sand'
-                    }`}
-                  />
-                </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">WHITE: IMMED</span>
-                <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
-                  L-04
-                </span>
-              </div>
-
-              {/* Red: Error (blinks 3 times on device, then stays on) */}
-              <div
-                className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  activeLeds.red
-                    ? 'bg-rose-100/90 border border-rose-400 shadow-[0_0_10px_rgba(239,68,68,0.5)] animate-pulse'
-                    : 'glass-card-inner border border-emerald-300/60 bg-emerald-50/50'
-                }`}
-                title="Red LED: Any error (INVALID OPCODE, INVALID MODE, OUT OF RANGE, UNMAPPED ADDR, OVERLAP CONFLICT, PERMISSION DENIED)"
-              >
-                <span
-                  className={`inline-flex rounded-full h-2.5 w-2.5 ${
-                    activeLeds.red
-                      ? 'bg-rose-600 shadow-[0_0_8px_rgba(239,68,68,0.9)] animate-ping'
-                      : 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
-                  }`}
-                />
-                <span
-                  className={`font-mono text-xs font-bold uppercase tracking-wider ${
-                    activeLeds.red ? 'text-rose-800' : 'text-emerald-800'
-                  }`}
-                >
-                  {activeLeds.red ? 'RED: ERROR' : 'RED: OFF (OK)'}
-                </span>
-              </div>
-            </div>
-          </section>
+          {/* 1. TOP HARDWARE TELEMETRY & PHYSICAL LED INDICATORS PANEL (Section 2, 6 & 11) */}
+          <HardwareLedPanel
+            activeLeds={activeLeds}
+            activeResult={activeResult}
+            isHwConnected={isHwConnected}
+            onConditionClick={(code, targetMap) => {
+              if (targetMap !== mapMode) {
+                handleMapToggle(targetMap);
+              }
+              executeDecode(code, targetMap);
+            }}
+          />
 
           {/* 2 & 3. MAIN WORKBENCH GRID */}
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-5">
@@ -1392,8 +1248,22 @@ export default function HardwareDecoder() {
             </section>
           </div>
 
+          {/* 3. DUAL-CORE HARDWARE VS SOFTWARE COMPARISON INTERFACE */}
+          <ComparisonCard
+            softwareResult={softwareResult}
+            hardwareResult={deviceResult}
+            isHardwareConnected={isHwConnected}
+            onConnectClick={handleConnectToggle}
+            onPresetClick={(code, targetMap) => {
+              if (targetMap !== mapMode) {
+                handleMapToggle(targetMap);
+              }
+              executeDecode(code, targetMap);
+            }}
+          />
+
           {/* 4. 16-BIT ARCHITECTURE ADDRESS SPACE & HARDWARE MEMORY MAP (SECTION 5) */}
-          <section className="w-full glass-panel p-5 md:p-6 rounded-2xl flex flex-col gap-4">
+          <section id="memory-map-section" className="w-full glass-panel p-5 md:p-6 rounded-2xl flex flex-col gap-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-brand-sand/30">
               <div className="flex items-center gap-3">
                 <span className="w-2 h-7 bg-brand-sand rounded-full shadow-sm" />
@@ -1716,7 +1586,7 @@ export default function HardwareDecoder() {
           </section>
 
           {/* 5. EVENT STREAM / HARDWARE ACTIVITY LOG */}
-          <section className="w-full glass-panel p-5 rounded-2xl flex flex-col gap-3">
+          <section id="activity-log-section" className="w-full glass-panel p-5 rounded-2xl flex flex-col gap-3">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <span className="w-2 h-6 bg-brand-taupe rounded-full shadow-sm" />

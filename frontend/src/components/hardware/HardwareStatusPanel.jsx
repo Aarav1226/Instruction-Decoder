@@ -1,9 +1,22 @@
 import { CONNECTION_STATES, LED_INDICATORS } from './hardwareUtils';
 import './HardwareDecoder.css';
 
-export default function HardwareStatusPanel({ connectionState, activeLed }) {
+export default function HardwareStatusPanel({ connectionState, activeLeds, activeLed }) {
   const isConnected = connectionState === CONNECTION_STATES.CONNECTED;
   const isError = connectionState === CONNECTION_STATES.ERROR;
+
+  // Supports both multi-LED object { blue, green, yellow, white, red } and legacy string
+  const ledsState = typeof activeLeds === 'object' && activeLeds !== null
+    ? activeLeds
+    : {
+        blue: activeLed === 'blue',
+        green: activeLed === 'green',
+        yellow: activeLed === 'yellow',
+        white: activeLed === 'white',
+        red: activeLed === 'error' || activeLed === 'red',
+      };
+
+  const hasAnyError = Boolean(ledsState.red || isError);
 
   return (
     <section className="hw-card hw-status-panel" aria-label="Hardware Status">
@@ -12,7 +25,7 @@ export default function HardwareStatusPanel({ connectionState, activeLed }) {
           <span className="hw-eyebrow">Physical Board Telemetry</span>
           <h3>Hardware Status</h3>
         </div>
-        <span className={`hw-board-chip ${isConnected ? 'is-online' : ''} ${isError ? 'is-error' : ''}`}>
+        <span className={`hw-board-chip ${isConnected ? 'is-online' : ''} ${hasAnyError ? 'is-error' : ''}`}>
           ESP32-WROOM
         </span>
       </div>
@@ -25,16 +38,15 @@ export default function HardwareStatusPanel({ connectionState, activeLed }) {
 
         <div className="hw-led-grid">
           {LED_INDICATORS.map((led) => {
-            const isActive = activeLed === led.key;
-            const isErrorLed = activeLed === 'error';
+            const isActive = Boolean(ledsState[led.key]);
             return (
               <div
                 key={led.key}
-                className={`hw-led-item ${isActive ? 'is-active' : 'is-dim'} ${isErrorLed && led.key !== 'error' ? 'is-error-pulse' : ''}`}
+                className={`hw-led-item ${isActive ? 'is-active' : 'is-dim'} ${ledsState.red && led.key === 'red' ? 'is-error-pulse' : ''}`}
               >
                 <span
-                  className={`hw-led-bulb led-${led.color} ${isActive ? 'is-lit' : ''} ${isErrorLed && led.key !== 'error' ? 'is-error' : ''}`}
-                  aria-label={`${led.label} LED ${isActive ? 'active' : 'inactive'}`}
+                  className={`hw-led-bulb led-${led.key} ${isActive ? 'is-lit' : ''}`}
+                  aria-label={`${led.label} ${isActive ? 'active' : 'inactive'}`}
                 />
                 <div className="hw-led-text">
                   <span className="hw-led-label">{led.label}</span>
@@ -46,10 +58,10 @@ export default function HardwareStatusPanel({ connectionState, activeLed }) {
         </div>
       </div>
 
-      {isError && (
+      {hasAnyError && (
         <div className="hw-error-indicator" role="alert">
           <span className="hw-error-dot" aria-hidden="true" />
-          <span>Device error state detected</span>
+          <span>Device architectural error detected</span>
         </div>
       )}
     </section>
