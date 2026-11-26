@@ -10,13 +10,15 @@ import {
 import {
   CONNECTION_STATES,
   MEMORY_MAPS,
-  decodeInstructionUI,
+  decodeInstructionJS,
   formatDeviceDecode,
+  OFFICIAL_TEST_CASES,
+  FIXED_REGISTERS,
 } from './hardwareUtils';
 
 function createLogEntry(type, message) {
   const now = new Date();
-  const time = now.toTimeString().split(' ')[0];
+  const time = now.toTimeString().slice(0, 8);
   return {
     id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     time,
@@ -25,22 +27,20 @@ function createLogEntry(type, message) {
   };
 }
 
-const PRESETS = [
-  { label: '0x1A5F (LOAD ROM)', code: '1A5F' },
-  { label: '0x2348 (STORE RAM)', code: '2348' },
-  { label: '0x8205 (I/O CTL)', code: '8205' },
-  { label: '0x7120 (OVERLAP CONFLICT)', code: '7120' },
-];
-
 export default function HardwareDecoder() {
   const [connectionState, setConnectionState] = useState(
     CONNECTION_STATES.DISCONNECTED
   );
   const [isWaitingReady, setIsWaitingReady] = useState(false);
-  const [hexInput, setHexInput] = useState('1A5F');
+  const [hexInput, setHexInput] = useState('1A73');
   const [mapMode, setMapMode] = useState(MEMORY_MAPS.DEFAULT);
-  const [decoded, setDecoded] = useState(() =>
-    decodeInstructionUI('1A5F', MEMORY_MAPS.DEFAULT)
+
+  // Hardware device result (received via Web Serial JSON from ESP32)
+  const [deviceResult, setDeviceResult] = useState(null);
+
+  // Local Software JS decoder result (strictly implementing sections 3, 4, 5, 6)
+  const [softwareResult, setSoftwareResult] = useState(() =>
+    decodeInstructionJS('1A73', MEMORY_MAPS.DEFAULT)
   );
 
   const [metrics, setMetrics] = useState({
@@ -51,14 +51,13 @@ export default function HardwareDecoder() {
   });
 
   const [logs, setLogs] = useState(() => [
-    createLogEntry('DECODE', 'Decoded 0x1A5F ➔ 0x1 (LOAD), EA 0x3E00 (ROM)'),
+    createLogEntry('DECODE', 'Decoded sample 0x1A73 ➔ LOAD R5,[R1+3], EA 0x4013 (RAM)'),
     createLogEntry(
       'CONNECTION',
       isSerialSupported()
-        ? 'Hardware UI initialized (Web Serial API ready).'
-        : 'Web Serial not supported in this browser. Please use Chrome/Edge.'
+        ? 'Hardware UI initialized (Web Serial API ready at 115200 baud).'
+        : 'Web Serial not supported in this browser. Please use Chrome or Edge.'
     ),
-    createLogEntry('DECODE', 'Loaded sample instruction 0x1A5F.'),
   ]);
 
   const mapModeRef = useRef(mapMode);
@@ -69,14 +68,17 @@ export default function HardwareDecoder() {
   const logConsoleRef = useRef(null);
 
   const appendLog = useCallback((type, message) => {
-    setLogs((prev) => [createLogEntry(type, message), ...prev].slice(0, 50));
+    setLogs((prev) => [createLogEntry(type, message), ...prev].slice(0, 60));
     if (type === 'ERROR') {
       setMetrics((m) => ({ ...m, errors: m.errors + 1 }));
     }
   }, []);
 
   /**
-   * Dispatches incoming device messages according to DEVICE_GUIDE.md protocol
+   * Dispatches incoming device messages according to Section 8 of DEVICE_GUIDE.md:
+   * 1. {"type":"ready"}
+   * 2. {"type":"decode",...}
+   * 3. {"type":"map",...}
    */
   const handleDeviceMessage = useCallback(
     (msg) => {
@@ -86,21 +88,21 @@ export default function HardwareDecoder() {
         setConnectionState(CONNECTION_STATES.CONNECTED);
         setIsWaitingReady(false);
         setMetrics((m) => ({ ...m, connections: m.connections + 1 }));
-        appendLog('CONNECTION', 'ESP32 Instruction Decoder ready (handshake confirmed).');
+        appendLog('CONNECTION', 'ESP32 {"type":"ready"} received. Board online & ready!');
       } else if (msg.type === 'decode') {
         const formatted = formatDeviceDecode(msg, mapModeRef.current);
-        setDecoded(formatted);
+        setDeviceResult(formatted);
         if (msg.instr) {
           setHexInput(msg.instr.toUpperCase());
         }
         setMetrics((m) => ({ ...m, decodes: m.decodes + 1 }));
 
-        if (formatted.errorStatus && formatted.errorStatus !== 'OK') {
-          appendLog('ERROR', `0x${msg.instr}: ${formatted.errorStatus}`);
+        if (msg.error && msg.error.trim().length > 0) {
+          appendLog('ERROR', `ESP32 0x${msg.instr}: ${msg.error}`);
         } else {
           appendLog(
             'DECODE',
-            `ESP32 Decoded 0x${msg.instr} ➔ ${msg.op}, EA ${formatted.effectiveAddress} (${msg.region})`
+            `ESP32 0x${msg.instr} ➔ ${msg.op}, EA 0x${(msg.ea || 0).toString(16).toUpperCase().padStart(4, '0')} (${msg.region || 'None'})`
           );
         }
       } else if (msg.type === 'map') {
@@ -112,9 +114,9 @@ export default function HardwareDecoder() {
         setMetrics((m) => ({ ...m, mapChanges: m.mapChanges + 1 }));
         appendLog(
           'MAP',
-          `ESP32 switched map to: ${
-            nextMap === MEMORY_MAPS.OVERLAP ? 'Overlap Map' : 'Default Map'
-          }`
+          `ESP32 switched map to: ${nextMap} (${
+            nextMap === MEMORY_MAPS.OVERLAP ? '0x7000–0x7FFF Overlap' : 'Standard Linear'
+          })`
         );
       } else if (msg.type === 'status') {
         if (msg.status === 'Disconnected') {
@@ -128,15 +130,13 @@ export default function HardwareDecoder() {
         setConnectionState(CONNECTION_STATES.ERROR);
         setIsWaitingReady(false);
         appendLog('ERROR', msg.error || 'Serial error occurred.');
-      } else if (msg.type === 'warning') {
-        appendLog('ERROR', msg.warning || 'Serial warning received.');
       }
     },
     [appendLog]
   );
 
   /**
-   * USB Connect / Disconnect Toggle
+   * Connect / Disconnect Toggle strictly using Web Serial requestPort() on click
    */
   const handleConnectToggle = async () => {
     if (connectionState === CONNECTION_STATES.CONNECTED || isWaitingReady) {
@@ -144,6 +144,7 @@ export default function HardwareDecoder() {
       await disconnectDevice();
       setConnectionState(CONNECTION_STATES.DISCONNECTED);
       setIsWaitingReady(false);
+      setDeviceResult(null);
       appendLog('CONNECTION', 'USB device disconnected.');
       return;
     }
@@ -172,7 +173,7 @@ export default function HardwareDecoder() {
       } else {
         setConnectionState(CONNECTION_STATES.DISCONNECTED);
         setIsWaitingReady(false);
-        appendLog('CONNECTION', 'USB connection cancelled by operator.');
+        appendLog('CONNECTION', 'USB connection cancelled by user.');
       }
     } catch (err) {
       setConnectionState(CONNECTION_STATES.ERROR);
@@ -182,30 +183,32 @@ export default function HardwareDecoder() {
   };
 
   /**
-   * Execute Decode on a specific 16-bit hex string
+   * Executes decoding both locally via JS decoder and sends to hardware if connected
    */
   const executeDecode = async (code, currentMap) => {
-    const cleanHex = code.replace(/[^0-9a-fA-F]/g, '').toUpperCase().padStart(4, '0');
+    const cleanHex = (code || '').replace(/[^0-9a-fA-F]/g, '').slice(0, 4).toUpperCase().padStart(4, '0');
     setHexInput(cleanHex);
 
+    // 1. Run exact JavaScript decoder
+    const swResult = decodeInstructionJS(cleanHex, currentMap);
+    setSoftwareResult(swResult);
+
+    // 2. If hardware is connected & ready, transmit over Web Serial
     if (isDeviceReady()) {
       try {
-        appendLog('DECODE', `Sending 0x${cleanHex} to ESP32 over serial...`);
+        appendLog('DECODE', `Sending 0x${cleanHex}\\n to ESP32 over serial...`);
         await sendInstruction(cleanHex);
       } catch (err) {
         appendLog('ERROR', `Failed to send instruction: ${err.message}`);
       }
     } else {
-      const result = decodeInstructionUI(cleanHex, currentMap);
-      setDecoded(result);
       setMetrics((m) => ({ ...m, decodes: m.decodes + 1 }));
-
-      if (result.errorStatus !== 'OK') {
-        appendLog('ERROR', `0x${cleanHex}: ${result.errorStatus}`);
+      if (swResult.error) {
+        appendLog('ERROR', `0x${cleanHex}: ${swResult.error}`);
       } else {
         appendLog(
           'DECODE',
-          `Decoded 0x${cleanHex} ➔ ${result.opcode}, EA ${result.effectiveAddress} (${result.memoryRegion})`
+          `Software Decoded 0x${cleanHex} ➔ ${swResult.op}, EA ${swResult.effectiveAddressHex} (${swResult.region || 'None'})`
         );
       }
     }
@@ -216,7 +219,7 @@ export default function HardwareDecoder() {
   };
 
   /**
-   * Bit button toggle (15 down to 0)
+   * Interactive Bit Toggle (15 down to 0)
    */
   const handleBitToggle = (bitIndex) => {
     const currentVal =
@@ -227,29 +230,26 @@ export default function HardwareDecoder() {
   };
 
   /**
-   * Switch memory map mode
+   * Memory Map Toggle: calls switchMap() if connected, or switches locally
    */
-  const handleMapChange = async (nextMap) => {
-    if (nextMap === mapMode) return;
+  const handleMapToggle = async (targetMap) => {
+    if (targetMap === mapMode) return;
 
     if (isDeviceReady()) {
       try {
-        appendLog('MAP', 'Sending MAP toggle command to ESP32...');
+        appendLog('MAP', 'Sending "map\\n" command to ESP32...');
         await switchMap();
       } catch (err) {
         appendLog('ERROR', `Failed to switch map on device: ${err.message}`);
       }
     } else {
-      setMapMode(nextMap);
+      setMapMode(targetMap);
       setMetrics((m) => ({ ...m, mapChanges: m.mapChanges + 1 }));
-      const result = decodeInstructionUI(hexInput, nextMap);
-      setDecoded(result);
+      executeDecode(hexInput, targetMap);
       appendLog(
         'MAP',
         `Memory map shifted to ${
-          nextMap === MEMORY_MAPS.DEFAULT
-            ? 'DEFAULT partition scheme'
-            : 'OVERLAP mode (RAM/IO conflict zone active)'
+          targetMap === MEMORY_MAPS.DEFAULT ? 'Default Map' : 'Overlap Map (0x7000–0x7FFF)'
         }`
       );
     }
@@ -272,14 +272,26 @@ export default function HardwareDecoder() {
     appendLog('STREAM', 'Export triggered. Telemetry frame dispatched.');
   };
 
-  // Cleanup on unmount
   useEffect(() => {
     return () => {
       disconnectDevice().catch(() => {});
     };
   }, []);
 
-  // Compute 16-bit fields from hexInput
+  // Primary active result to display: deviceResult if hardware connected, otherwise softwareResult
+  const isHwConnected = connectionState === CONNECTION_STATES.CONNECTED && !isWaitingReady;
+  const activeResult = isHwConnected && deviceResult ? deviceResult : softwareResult;
+
+  // Section 12: Check whether hardware and software results match side by side
+  const resultsMatch =
+    isHwConnected && deviceResult
+      ? deviceResult.op === softwareResult.op &&
+        deviceResult.ea === softwareResult.ea &&
+        deviceResult.region === softwareResult.region &&
+        deviceResult.error === softwareResult.error
+      : null;
+
+  // 16-bit fields
   const intVal =
     parseInt(hexInput.replace(/[^0-9a-fA-F]/g, '') || '0', 16) & 0xffff;
   const opVal = (intVal >> 12) & 0xf;
@@ -288,19 +300,21 @@ export default function HardwareDecoder() {
   const modeVal = (intVal >> 4) & 0x3;
   const offsetVal = intVal & 0xf;
 
-  const opNames = [
-    'NOP', 'LOAD', 'STORE', 'ADD', 'SUB', 'MOV', 'JMP', 'JZ',
-    'AND', 'OR', 'XOR', 'NOT', 'CMP', 'SHL', 'SHR', 'HALT'
-  ];
-  const modeNames = ['Immediate (00)', 'Direct (01)', 'Indirect (10)', 'Indexed (11)'];
+  // Active LEDs
+  const activeLeds = activeResult.leds || {
+    blue: false,
+    green: false,
+    yellow: false,
+    white: false,
+    red: false,
+  };
 
   // Proportional pointer calculation (0 - 65535)
   const pointerPercent =
-    decoded.addressValue !== null && !Number.isNaN(decoded.addressValue)
-      ? Math.min(Math.max((decoded.addressValue / 65535) * 100, 1), 99)
+    activeResult.memAccess && activeResult.ea !== null && activeResult.ea <= 0xffff
+      ? Math.min(Math.max((activeResult.ea / 65535) * 100, 0.5), 99.5)
       : null;
 
-  const isConnected = connectionState === CONNECTION_STATES.CONNECTED;
   const isConnecting = connectionState === CONNECTION_STATES.CONNECTING;
   const isError = connectionState === CONNECTION_STATES.ERROR;
 
@@ -314,7 +328,7 @@ export default function HardwareDecoder() {
               <div className="flex items-center gap-2">
                 <span
                   className={`w-2.5 h-2.5 rounded-full ${
-                    isConnected
+                    isHwConnected
                       ? 'bg-emerald-500 shadow-[0_0_8px_rgba(16,185,129,1)]'
                       : isConnecting || isWaitingReady
                         ? 'bg-amber-500 shadow-[0_0_8px_rgba(245,158,11,1)]'
@@ -350,7 +364,7 @@ export default function HardwareDecoder() {
               <div className="flex items-center gap-1.5 px-2 py-1 bg-brand-cream/60 rounded-lg">
                 <span className="font-mono text-[10px] font-bold text-brand-taupe uppercase">BUS</span>
                 <span className="font-mono text-xs text-brand-dark font-bold">
-                  {isConnected ? 'ACTIVE' : 'STANDBY'}
+                  {isHwConnected ? 'ACTIVE' : 'STANDBY'}
                 </span>
               </div>
               <div className="flex items-center gap-1.5 px-2 py-1 bg-brand-cream/60 rounded-lg">
@@ -358,19 +372,19 @@ export default function HardwareDecoder() {
                 <span className="font-mono text-xs text-brand-dark font-bold">16MHz</span>
               </div>
               <div className="flex items-center gap-1.5 px-2 py-1 bg-brand-cream/60 rounded-lg">
-                <span className="font-mono text-[10px] font-bold text-brand-taupe uppercase">VOLT</span>
-                <span className="font-mono text-xs text-brand-deep font-bold">3.3V</span>
+                <span className="font-mono text-[10px] font-bold text-brand-taupe uppercase">BAUD</span>
+                <span className="font-mono text-xs text-brand-deep font-bold">115200</span>
               </div>
             </div>
 
-            {/* Connection Badge & USB Action */}
+            {/* Section 12: Connect Device button & Hardware connected badge */}
             <div className="flex items-center gap-3 glass-card-inner px-3 py-1.5 rounded-xl shadow-sm">
               <div className="flex flex-col text-right">
                 <div className="flex items-center justify-end gap-1.5">
                   <span
                     className={`w-2 h-2 rounded-full ${
-                      isConnected
-                        ? 'bg-emerald-500'
+                      isHwConnected
+                        ? 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,1)]'
                         : isWaitingReady
                           ? 'bg-amber-500 animate-pulse'
                           : isError
@@ -380,7 +394,7 @@ export default function HardwareDecoder() {
                   />
                   <span
                     className={`font-mono text-[10px] font-bold uppercase ${
-                      isConnected
+                      isHwConnected
                         ? 'text-emerald-700'
                         : isWaitingReady
                           ? 'text-amber-700'
@@ -398,7 +412,7 @@ export default function HardwareDecoder() {
               </div>
               <button
                 className={`flex items-center gap-1.5 ${
-                  isConnected
+                  isHwConnected
                     ? 'bg-emerald-700 hover:bg-emerald-800'
                     : isError
                       ? 'bg-rose-600 hover:bg-rose-700'
@@ -414,7 +428,7 @@ export default function HardwareDecoder() {
                   ? 'Cancel'
                   : isConnecting
                     ? 'Connecting...'
-                    : isConnected
+                    : isHwConnected
                       ? 'Disconnect'
                       : isError
                         ? 'Retry USB'
@@ -431,7 +445,7 @@ export default function HardwareDecoder() {
       {/* MAIN VIEWPORT */}
       <main className="w-full pt-28 pb-12 flex-1 flex flex-col">
         <div className="w-full max-w-[1680px] mx-auto px-4 md:px-8 flex flex-col gap-5 text-brand-dark">
-          {/* 1. TOP HARDWARE TELEMETRY & PINOUT STRIP */}
+          {/* 1. TOP HARDWARE TELEMETRY & PHYSICAL LED INDICATORS STRIP (Section 2) */}
           <section className="w-full glass-panel rounded-2xl p-4 md:p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4 relative overflow-hidden">
             <div className="absolute -right-16 -top-16 w-64 h-64 rounded-full bg-brand-slate/20 blur-3xl pointer-events-none" />
 
@@ -444,7 +458,7 @@ export default function HardwareDecoder() {
                     HARDWARE CORE
                   </span>
                   <span className="font-mono text-xs md:text-sm text-brand-dark font-extrabold tracking-wide">
-                    ESP32-WROOM-32D
+                    ESP32-WROOM-32D (OLED + 5 LEDs)
                   </span>
                 </div>
               </div>
@@ -452,145 +466,157 @@ export default function HardwareDecoder() {
               <div className="flex items-center gap-2 glass-card-inner px-3 py-2 rounded-xl">
                 <span className="material-symbols-outlined text-[16px] text-brand-taupe">schema</span>
                 <span className="font-mono text-[10px] text-brand-taupe uppercase font-semibold">
-                  BUS STATE:
+                  DECODER SOURCE:
                 </span>
                 <span className="font-mono text-xs text-brand-dark font-bold tracking-wider">
-                  {isConnected ? 'GPIO / DECODER BUS ACTIVE LINK' : 'GPIO / DECODER BUS LINK STANDBY'}
+                  {isHwConnected ? 'ESP32 HARDWARE VIA USB SERIAL' : 'JAVASCRIPT CORE (DEVICE_GUIDE.MD)'}
                 </span>
               </div>
 
-              <div className="flex items-center gap-2 glass-card-inner px-3 py-2 rounded-xl">
-                <span className="font-mono text-[10px] text-brand-taupe uppercase font-semibold">
-                  CORE ARCH:
-                </span>
-                <span className="font-mono text-xs text-brand-deep font-semibold">
-                  HARVARD / 16-BIT CISC/RISC EMU
-                </span>
-              </div>
+              {/* Section 12: Match / Mismatch Indicator */}
+              {isHwConnected && resultsMatch !== null && (
+                <div
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-xl border font-mono text-xs font-bold uppercase ${
+                    resultsMatch
+                      ? 'bg-emerald-100/90 text-emerald-800 border-emerald-400'
+                      : 'bg-rose-100/90 text-rose-800 border-rose-400 animate-pulse'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px]">
+                    {resultsMatch ? 'check_circle' : 'cancel'}
+                  </span>
+                  <span>{resultsMatch ? '✓ HW & SW MATCH' : '✗ HW/SW MISMATCH'}</span>
+                </div>
+              )}
             </div>
 
-            {/* Right: Active Bus LED Indicators Array (5 LEDs) */}
+            {/* Right: Active Bus LED Indicators Array (Section 2 & 11) */}
             <div className="flex flex-wrap items-center gap-2.5 z-10">
-              {/* ROM ACCESS */}
+              {/* Blue: ROM */}
               <div
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  decoded.activeLed === 'rom'
-                    ? 'bg-blue-100/70 border border-blue-400/80 shadow-[0_0_10px_rgba(59,130,246,0.3)]'
-                    : 'glass-card-inner opacity-60'
+                  activeLeds.blue
+                    ? 'bg-blue-100/80 border border-blue-400/90 shadow-[0_0_10px_rgba(59,130,246,0.5)]'
+                    : 'glass-card-inner opacity-50'
                 }`}
+                title="Blue LED: Address is in ROM (0x0000–0x3FFF)"
               >
                 <span className="relative flex h-2.5 w-2.5">
-                  {decoded.activeLed === 'rom' && (
+                  {activeLeds.blue && (
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
                   )}
                   <span
                     className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      decoded.activeLed === 'rom'
+                      activeLeds.blue
                         ? 'bg-blue-600 shadow-[0_0_6px_rgba(37,99,235,0.8)]'
                         : 'bg-brand-sand'
                     }`}
                   />
                 </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">ROM ACCESS</span>
+                <span className="font-mono text-xs font-bold text-brand-dark">BLUE: ROM</span>
                 <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
                   L-01
                 </span>
               </div>
 
-              {/* RAM ACCESS */}
+              {/* Green: RAM */}
               <div
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  decoded.activeLed === 'ram'
-                    ? 'bg-emerald-100/70 border border-emerald-400/80 shadow-[0_0_10px_rgba(16,185,129,0.3)]'
-                    : 'glass-card-inner opacity-60'
+                  activeLeds.green
+                    ? 'bg-emerald-100/80 border border-emerald-400/90 shadow-[0_0_10px_rgba(16,185,129,0.5)]'
+                    : 'glass-card-inner opacity-50'
                 }`}
+                title="Green LED: Address is in RAM (0x4000–0x7FFF)"
               >
                 <span className="relative flex h-2.5 w-2.5">
-                  {decoded.activeLed === 'ram' && (
+                  {activeLeds.green && (
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
                   )}
                   <span
                     className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      decoded.activeLed === 'ram'
+                      activeLeds.green
                         ? 'bg-emerald-600 shadow-[0_0_6px_rgba(5,150,105,0.8)]'
                         : 'bg-brand-sand'
                     }`}
                   />
                 </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">RAM ACCESS</span>
+                <span className="font-mono text-xs font-bold text-brand-dark">GREEN: RAM</span>
                 <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
                   L-02
                 </span>
               </div>
 
-              {/* I/O ACCESS */}
+              {/* Yellow: I/O */}
               <div
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  decoded.activeLed === 'io'
-                    ? 'bg-amber-100/70 border border-amber-400/80 shadow-[0_0_10px_rgba(245,158,11,0.3)]'
-                    : 'glass-card-inner opacity-60'
+                  activeLeds.yellow
+                    ? 'bg-amber-100/80 border border-amber-400/90 shadow-[0_0_10px_rgba(245,158,11,0.5)]'
+                    : 'glass-card-inner opacity-50'
                 }`}
+                title="Yellow LED: Address is in I/O (0x8000–0x9FFF or 0x7000–0x9FFF)"
               >
                 <span className="relative flex h-2.5 w-2.5">
-                  {decoded.activeLed === 'io' && (
+                  {activeLeds.yellow && (
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75" />
                   )}
                   <span
                     className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      decoded.activeLed === 'io'
+                      activeLeds.yellow
                         ? 'bg-amber-600 shadow-[0_0_6px_rgba(217,119,6,0.8)]'
                         : 'bg-brand-sand'
                     }`}
                   />
                 </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">I/O ACCESS</span>
+                <span className="font-mono text-xs font-bold text-brand-dark">YELLOW: I/O</span>
                 <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
                   L-03
                 </span>
               </div>
 
-              {/* IMMED / NO MEM */}
+              {/* White: Immediate / No Mem */}
               <div
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  decoded.activeLed === 'immediate'
-                    ? 'bg-white/90 border border-slate-300 shadow-[0_0_8px_rgba(255,255,255,0.9)]'
-                    : 'glass-card-inner opacity-60'
+                  activeLeds.white
+                    ? 'bg-white/95 border border-slate-300 shadow-[0_0_10px_rgba(255,255,255,1)]'
+                    : 'glass-card-inner opacity-50'
                 }`}
+                title="White LED: Valid instruction with no memory access (Immediate mode)"
               >
                 <span className="relative flex h-2.5 w-2.5">
                   <span
                     className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                      decoded.activeLed === 'immediate' ? 'bg-white border border-slate-400' : 'bg-brand-sand'
+                      activeLeds.white ? 'bg-white border border-slate-400 shadow-sm' : 'bg-brand-sand'
                     }`}
                   />
                 </span>
-                <span className="font-mono text-xs font-bold text-brand-dark">IMMED / NO MEM</span>
+                <span className="font-mono text-xs font-bold text-brand-dark">WHITE: IMMED</span>
                 <span className="font-mono text-[10px] px-1.5 py-0.5 rounded bg-white/70 text-brand-deep font-bold border border-brand-sand/50">
                   L-04
                 </span>
               </div>
 
-              {/* ERROR INDICATOR */}
+              {/* Red: Error (blinks 3 times on device, then stays on) */}
               <div
                 className={`flex items-center gap-2 px-3 py-1.5 rounded-xl transition-all shadow-sm ${
-                  decoded.activeLed === 'error'
-                    ? 'bg-rose-100/90 border border-rose-400 shadow-[0_0_10px_rgba(239,68,68,0.4)]'
+                  activeLeds.red
+                    ? 'bg-rose-100/90 border border-rose-400 shadow-[0_0_10px_rgba(239,68,68,0.5)] animate-pulse'
                     : 'glass-card-inner border border-emerald-300/60 bg-emerald-50/50'
                 }`}
+                title="Red LED: Any error (INVALID OPCODE, INVALID MODE, OUT OF RANGE, UNMAPPED ADDR, OVERLAP CONFLICT, PERMISSION DENIED)"
               >
                 <span
                   className={`inline-flex rounded-full h-2.5 w-2.5 ${
-                    decoded.activeLed === 'error'
-                      ? 'bg-rose-500 shadow-[0_0_6px_rgba(239,68,68,0.8)] animate-pulse'
+                    activeLeds.red
+                      ? 'bg-rose-600 shadow-[0_0_8px_rgba(239,68,68,0.9)] animate-ping'
                       : 'bg-emerald-500 shadow-[0_0_6px_rgba(16,185,129,0.5)]'
                   }`}
                 />
                 <span
                   className={`font-mono text-xs font-bold uppercase tracking-wider ${
-                    decoded.activeLed === 'error' ? 'text-rose-800' : 'text-emerald-800'
+                    activeLeds.red ? 'text-rose-800' : 'text-emerald-800'
                   }`}
                 >
-                  {decoded.activeLed === 'error' ? 'ERR: FAULT' : 'ERR: OK'}
+                  {activeLeds.red ? 'RED: ERROR' : 'RED: OFF (OK)'}
                 </span>
               </div>
             </div>
@@ -605,7 +631,7 @@ export default function HardwareDecoder() {
                   <span className="w-2 h-7 bg-brand-slate rounded-full shadow-sm" />
                   <div>
                     <span className="font-mono text-[10px] text-brand-taupe font-bold uppercase tracking-wider">
-                      STAGE 01 // INSTRUCTION BUS TAP
+                      STAGE 01 // INSTRUCTION BUS TAP (SECTION 3)
                     </span>
                     <h2 className="font-sans text-xl md:text-2xl text-brand-dark font-bold uppercase tracking-tight">
                       16-Bit Machine Word &amp; Logic Analyzer
@@ -614,10 +640,10 @@ export default function HardwareDecoder() {
                 </div>
                 <div className="flex items-center gap-2 self-start sm:self-auto glass-card-inner px-3 py-1.5 rounded-xl">
                   <span className="font-mono text-[10px] text-brand-taupe uppercase font-semibold">
-                    PROTOCOL:
+                    ACTIVE MAP:
                   </span>
                   <span className="font-mono text-xs text-brand-dark font-bold">
-                    16-BIT BIG ENDIAN [15:0]
+                    {mapMode} ({mapMode === MEMORY_MAPS.OVERLAP ? 'Overlap Active' : 'Default Linear'})
                   </span>
                 </div>
               </div>
@@ -656,31 +682,54 @@ export default function HardwareDecoder() {
                     onClick={handleDecodeClick}
                   >
                     <span className="material-symbols-outlined text-[16px]">play_circle</span>
-                    {isDeviceReady() ? 'Decode (ESP32)' : 'Decode'}
+                    {isHwConnected ? 'Decode (ESP32)' : 'Decode'}
                   </button>
                 </div>
 
-                {/* Quick Test Presets */}
+                {/* Section 11 Official Test Presets */}
                 <div className="flex flex-wrap items-center gap-1.5 w-full md:w-auto justify-end">
                   <span className="font-mono text-[10px] text-brand-taupe uppercase font-bold mr-1">
-                    PRESETS:
+                    TEST CASES (SEC 11):
                   </span>
-                  {PRESETS.map((preset) => (
+                  {OFFICIAL_TEST_CASES.slice(0, 4).map((preset) => (
                     <button
                       key={preset.code}
                       className="px-2.5 py-1.5 rounded-lg bg-white/70 hover:bg-brand-slate/40 text-brand-deep font-mono text-xs font-semibold border border-brand-sand/40 transition-colors shadow-sm"
                       type="button"
-                      onClick={() => executeDecode(preset.code, mapMode)}
+                      onClick={() => {
+                        if (preset.map !== mapMode) {
+                          handleMapToggle(preset.map);
+                        }
+                        executeDecode(preset.code, preset.map);
+                      }}
+                      title={preset.label}
                     >
-                      {preset.label}
+                      {preset.code}
+                    </button>
+                  ))}
+                  {/* More test case dropdown or additional presets */}
+                  {OFFICIAL_TEST_CASES.slice(4).map((preset) => (
+                    <button
+                      key={preset.code}
+                      className="px-2 py-1.5 rounded-lg bg-white/70 hover:bg-brand-slate/40 text-brand-deep font-mono text-xs font-semibold border border-brand-sand/40 transition-colors shadow-sm"
+                      type="button"
+                      onClick={() => {
+                        if (preset.map !== mapMode) {
+                          handleMapToggle(preset.map);
+                        }
+                        executeDecode(preset.code, preset.map);
+                      }}
+                      title={preset.label}
+                    >
+                      {preset.code}
                     </button>
                   ))}
                 </div>
               </div>
 
-              {/* 16-Bit Architecture Sub-Field Partition Badges */}
+              {/* 16-Bit Architecture Sub-Field Partition Badges (Section 3) */}
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
-                {/* Opcode */}
+                {/* Opcode [15:12] */}
                 <div className="glass-card-inner p-3 rounded-xl shadow-sm flex flex-col justify-between">
                   <div className="flex items-center justify-between pb-1 border-b border-brand-sand/20">
                     <span className="font-mono text-[10px] font-bold text-brand-taupe">
@@ -694,13 +743,17 @@ export default function HardwareDecoder() {
                     <span className="font-mono text-sm md:text-base text-brand-dark font-extrabold">
                       {opVal.toString(2).padStart(4, '0')}
                     </span>
-                    <span className="font-mono text-[11px] text-brand-deep font-bold">
-                      0x{opVal.toString(16).toUpperCase()} ({opNames[opVal] || 'OP'})
+                    <span
+                      className={`font-mono text-[11px] font-bold ${
+                        opVal >= 1 && opVal <= 4 ? 'text-brand-deep' : 'text-rose-700'
+                      }`}
+                    >
+                      0x{opVal.toString(16).toUpperCase()} ({activeResult.op})
                     </span>
                   </div>
                 </div>
 
-                {/* Dest Reg */}
+                {/* Dest Reg [11:9] */}
                 <div className="glass-card-inner p-3 rounded-xl shadow-sm flex flex-col justify-between">
                   <div className="flex items-center justify-between pb-1 border-b border-brand-sand/20">
                     <span className="font-mono text-[10px] font-bold text-brand-taupe">
@@ -720,7 +773,7 @@ export default function HardwareDecoder() {
                   </div>
                 </div>
 
-                {/* Src Reg */}
+                {/* Src Reg [8:6] & Value from Section 4 */}
                 <div className="glass-card-inner p-3 rounded-xl shadow-sm flex flex-col justify-between">
                   <div className="flex items-center justify-between pb-1 border-b border-brand-sand/20">
                     <span className="font-mono text-[10px] font-bold text-brand-taupe">
@@ -734,13 +787,13 @@ export default function HardwareDecoder() {
                     <span className="font-mono text-sm md:text-base text-brand-dark font-extrabold">
                       {srcVal.toString(2).padStart(3, '0')}
                     </span>
-                    <span className="font-mono text-[11px] text-brand-taupe font-bold">
-                      R{srcVal} ({srcVal.toString(2).padStart(3, '0')}b)
+                    <span className="font-mono text-[11px] text-brand-taupe font-bold" title={FIXED_REGISTERS[srcVal]?.desc}>
+                      R{srcVal} (0x{FIXED_REGISTERS[srcVal]?.value.toString(16).toUpperCase()})
                     </span>
                   </div>
                 </div>
 
-                {/* Addr Mode */}
+                {/* Addr Mode [5:4] */}
                 <div className="glass-card-inner p-3 rounded-xl shadow-sm flex flex-col justify-between">
                   <div className="flex items-center justify-between pb-1 border-b border-brand-sand/20">
                     <span className="font-mono text-[10px] font-bold text-brand-taupe">
@@ -755,12 +808,12 @@ export default function HardwareDecoder() {
                       {modeVal.toString(2).padStart(2, '0')}
                     </span>
                     <span className="font-mono text-[11px] text-brand-deep font-bold">
-                      {modeNames[modeVal]}
+                      {activeResult.modeStr} ({modeVal})
                     </span>
                   </div>
                 </div>
 
-                {/* Offset */}
+                {/* Offset [3:0] */}
                 <div className="glass-card-inner p-3 rounded-xl shadow-sm flex flex-col justify-between col-span-2 sm:col-span-1">
                   <div className="flex items-center justify-between pb-1 border-b border-brand-sand/20">
                     <span className="font-mono text-[10px] font-bold text-brand-taupe">
@@ -810,7 +863,7 @@ export default function HardwareDecoder() {
                         }`}
                         type="button"
                         onClick={() => handleBitToggle(bit)}
-                        title={`Toggle bit ${bit}`}
+                        title={`Click to flip Bit ${bit}`}
                       >
                         <span className="font-mono text-[10px] text-brand-taupe font-bold">
                           {bit}
@@ -935,10 +988,10 @@ export default function HardwareDecoder() {
                     IR_LATCH: 0x{hexInput}
                   </text>
                   <text className="font-mono text-[9px] font-bold" fill="#3E2B25" x="420" y="20">
-                    ALU_ADD ({decoded.effectiveAddress})
+                    ALU_ADD ({activeResult.effectiveAddressHex})
                   </text>
                   <text className="font-mono text-[9px] font-bold" fill="#3E2B25" x="590" y="46">
-                    {decoded.accessType === 'Write' ? 'MEM_WRITE' : 'MEM_READ'}
+                    {activeResult.op === 'STORE' ? 'MEM_WRITE' : 'MEM_READ'}
                   </text>
                 </svg>
               </div>
@@ -958,23 +1011,18 @@ export default function HardwareDecoder() {
                   </div>
                   <span
                     className={`px-2.5 py-1 rounded-lg font-mono text-xs font-bold uppercase border shadow-sm ${
-                      decoded.hasOverlapConflict
-                        ? 'bg-rose-100 text-rose-800 border-rose-300'
-                        : decoded.errorStatus === 'OK'
-                          ? 'bg-emerald-100/80 text-emerald-800 border-emerald-300/50'
-                          : 'bg-rose-100/80 text-rose-800 border-rose-300/50'
+                      activeResult.error
+                        ? 'bg-rose-100/90 text-rose-800 border-rose-300'
+                        : 'bg-emerald-100/80 text-emerald-800 border-emerald-300/50'
                     }`}
                   >
-                    {decoded.hasOverlapConflict
-                      ? 'OVERLAP CONFLICT'
-                      : decoded.errorStatus === 'OK'
-                        ? 'VALID / OK'
-                        : 'FAULT'}
+                    {activeResult.error ? activeResult.error : 'VALID / OK'}
                   </span>
                 </div>
 
                 <p className="font-body text-xs text-brand-deep leading-relaxed">
                   Decoded microcode telemetry lines ready for ALU execution &amp; memory addressing.
+                  {isHwConnected ? ' Source: ESP32 Hardware link.' : ' Source: JavaScript core simulation.'}
                 </p>
 
                 {/* Telemetry Key-Value Matrix */}
@@ -989,7 +1037,7 @@ export default function HardwareDecoder() {
                         0x{opVal.toString(16).toUpperCase()}
                       </span>
                       <span className="font-mono text-xs text-brand-dark font-extrabold">
-                        {decoded.opcode}
+                        {activeResult.op}
                       </span>
                     </div>
                   </div>
@@ -1000,17 +1048,17 @@ export default function HardwareDecoder() {
                       DEST REGISTER
                     </span>
                     <span className="font-mono text-xs text-brand-dark font-bold">
-                      {decoded.destReg} (Target Accumulator)
+                      {activeResult.destRegStr} (Target Accumulator)
                     </span>
                   </div>
 
-                  {/* Source Register */}
+                  {/* Source Register & Fixed Value (Section 4) */}
                   <div className="flex items-center justify-between px-3.5 py-2 hover:bg-white/60 transition-colors">
                     <span className="font-mono text-[10px] text-brand-taupe uppercase font-bold">
                       SRC REGISTER
                     </span>
                     <span className="font-mono text-xs text-brand-dark font-bold">
-                      {decoded.srcReg} (Base Address)
+                      {activeResult.srcRegStr} (Base 0x{FIXED_REGISTERS[srcVal]?.value.toString(16).toUpperCase()})
                     </span>
                   </div>
 
@@ -1020,7 +1068,7 @@ export default function HardwareDecoder() {
                       ADDRESSING MODE
                     </span>
                     <span className="font-mono text-xs text-brand-deep font-bold">
-                      {decoded.addrMode}
+                      {activeResult.modeStr} ({modeVal})
                     </span>
                   </div>
 
@@ -1030,19 +1078,19 @@ export default function HardwareDecoder() {
                       OFFSET DISPLACEMENT
                     </span>
                     <span className="font-mono text-xs text-brand-dark font-bold">
-                      {decoded.offset}
+                      0x{offsetVal.toString(16).toUpperCase()} ({offsetVal} dec)
                     </span>
                   </div>
 
-                  {/* Effective Address */}
+                  {/* Effective Address (Section 8: decimal ea & hex conversion) */}
                   <div className="flex items-center justify-between px-3.5 py-2 hover:bg-white/60 transition-colors bg-brand-slate/20">
                     <span className="font-mono text-[10px] text-brand-dark uppercase font-bold">
                       EFFECTIVE ADDRESS
                     </span>
                     <span className="font-mono text-xs text-brand-dark font-extrabold">
-                      {decoded.effectiveAddress}{' '}
-                      {decoded.effectiveAddressDecimal !== 'N/A' &&
-                        `(${decoded.effectiveAddressDecimal} dec)`}
+                      {activeResult.effectiveAddressHex !== 'none'
+                        ? `${activeResult.effectiveAddressHex} (${activeResult.ea} dec)`
+                        : 'none (Immediate)'}
                     </span>
                   </div>
 
@@ -1053,12 +1101,14 @@ export default function HardwareDecoder() {
                     </span>
                     <span
                       className={`px-2 py-0.5 rounded font-mono text-xs font-bold uppercase border ${
-                        decoded.hasOverlapConflict
+                        activeResult.error === 'OVERLAP CONFLICT'
                           ? 'bg-rose-100 text-rose-800 border-rose-300'
-                          : 'bg-brand-sand/40 text-brand-dark border-brand-sand/60'
+                          : activeResult.region
+                            ? 'bg-brand-sand/40 text-brand-dark border-brand-sand/60'
+                            : 'bg-slate-100 text-brand-taupe border-slate-200'
                       }`}
                     >
-                      {decoded.memoryRegion}
+                      {activeResult.region || 'None'}
                     </span>
                   </div>
 
@@ -1068,26 +1118,30 @@ export default function HardwareDecoder() {
                       ACCESS TYPE
                     </span>
                     <span className="font-mono text-xs text-brand-dark font-bold">
-                      {decoded.accessType}
+                      {!activeResult.memAccess
+                        ? 'NO MEMORY ACCESS'
+                        : activeResult.op === 'STORE'
+                          ? 'WRITE'
+                          : 'READ'}
                     </span>
                   </div>
 
-                  {/* Bus Error Status */}
+                  {/* Error Status (Section 6 exact strings) */}
                   <div className="flex items-center justify-between px-3.5 py-2 hover:bg-white/60 transition-colors">
                     <span className="font-mono text-[10px] text-brand-taupe uppercase font-bold">
-                      BUS ERROR STATUS
+                      ERROR STATUS
                     </span>
                     <span
                       className={`flex items-center gap-1.5 font-mono text-xs font-bold ${
-                        decoded.errorStatus === 'OK' ? 'text-emerald-800' : 'text-rose-700'
+                        !activeResult.error ? 'text-emerald-800' : 'text-rose-700'
                       }`}
                     >
                       <span
                         className={`w-2 h-2 rounded-full ${
-                          decoded.errorStatus === 'OK' ? 'bg-emerald-500' : 'bg-rose-500 animate-ping'
+                          !activeResult.error ? 'bg-emerald-500' : 'bg-rose-500 animate-ping'
                         }`}
                       />
-                      {decoded.errorStatus === 'OK' ? 'NONE (0x00 OK)' : decoded.errorStatus}
+                      {activeResult.error ? activeResult.error : 'NONE (0x00 OK)'}
                     </span>
                   </div>
                 </div>
@@ -1108,14 +1162,14 @@ export default function HardwareDecoder() {
             </section>
           </div>
 
-          {/* 4. 16-BIT ARCHITECTURE ADDRESS SPACE & HARDWARE MEMORY MAP */}
+          {/* 4. 16-BIT ARCHITECTURE ADDRESS SPACE & HARDWARE MEMORY MAP (SECTION 5) */}
           <section className="w-full glass-panel p-5 md:p-6 rounded-2xl flex flex-col gap-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-2 border-b border-brand-sand/30">
               <div className="flex items-center gap-3">
                 <span className="w-2 h-7 bg-brand-sand rounded-full shadow-sm" />
                 <div>
                   <span className="font-mono text-[10px] text-brand-taupe font-bold uppercase tracking-wider">
-                    STAGE 02 // BUS INTERFACE UNIT
+                    STAGE 02 // BUS INTERFACE UNIT (SECTION 5)
                   </span>
                   <h2 className="font-sans text-xl md:text-2xl text-brand-dark font-bold uppercase tracking-tight">
                     16-Bit Architecture Address Space (0x0000–0xFFFF)
@@ -1123,7 +1177,7 @@ export default function HardwareDecoder() {
                 </div>
               </div>
 
-              {/* Mode Toggle & Target Callout */}
+              {/* Section 12: Mode Toggles calling switchMap() */}
               <div className="flex flex-wrap items-center gap-3">
                 <div className="flex items-center bg-white/70 p-1 rounded-xl border border-brand-sand/40 shadow-sm">
                   <button
@@ -1133,7 +1187,7 @@ export default function HardwareDecoder() {
                         : 'text-brand-deep hover:text-brand-dark'
                     }`}
                     type="button"
-                    onClick={() => handleMapChange(MEMORY_MAPS.DEFAULT)}
+                    onClick={() => handleMapToggle(MEMORY_MAPS.DEFAULT)}
                   >
                     Default Map
                   </button>
@@ -1144,7 +1198,7 @@ export default function HardwareDecoder() {
                         : 'text-brand-deep hover:text-brand-dark'
                     }`}
                     type="button"
-                    onClick={() => handleMapChange(MEMORY_MAPS.OVERLAP)}
+                    onClick={() => handleMapToggle(MEMORY_MAPS.OVERLAP)}
                   >
                     Overlap Map
                   </button>
@@ -1158,23 +1212,48 @@ export default function HardwareDecoder() {
                     EFFECTIVE TARGET:
                   </span>
                   <span className="font-mono text-xs text-brand-dark font-bold tracking-wider">
-                    {decoded.addressValue !== null
-                      ? `${decoded.effectiveAddress} (${decoded.effectiveAddressDecimal} dec) ➔ ${decoded.memoryRegion}`
+                    {activeResult.memAccess
+                      ? `${activeResult.effectiveAddressHex} (${activeResult.ea} dec) ➔ ${activeResult.region || 'Unmapped'}`
                       : 'None (Immediate)'}
                   </span>
                 </div>
               </div>
             </div>
 
+            {/* Overlap Map Warning Banner (Section 5 & 12) */}
+            {mapMode === MEMORY_MAPS.OVERLAP && (
+              <div
+                className={`p-3 rounded-xl border flex items-center justify-between gap-3 text-xs font-mono ${
+                  activeResult.error === 'OVERLAP CONFLICT'
+                    ? 'bg-rose-100/90 text-rose-900 border-rose-400 animate-pulse'
+                    : 'bg-amber-100/80 text-amber-900 border-amber-300'
+                }`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="material-symbols-outlined text-[18px]">
+                    {activeResult.error === 'OVERLAP CONFLICT' ? 'warning' : 'info'}
+                  </span>
+                  <span>
+                    <strong>OVERLAP MAP ACTIVE:</strong> I/O is 0x7000–0x9FFF, intentionally overlapping RAM from 0x7000 to 0x7FFF.
+                    {activeResult.error === 'OVERLAP CONFLICT' &&
+                      ' ➔ CONFLICT DETECTED: Address is inside two regions at once!'}
+                  </span>
+                </div>
+                <span className="font-bold uppercase tracking-wider">
+                  {activeResult.error === 'OVERLAP CONFLICT' ? 'OVERLAP CONFLICT' : 'OVERLAP DEMO'}
+                </span>
+              </div>
+            )}
+
             {/* Segmented Physical Address Space Ruler / Memory Strip */}
             <div className="flex flex-col gap-1.5 glass-card-inner p-4 rounded-xl shadow-inner">
               <div className="flex items-center justify-between font-mono text-[10px] text-brand-taupe font-bold">
-                <span>0x0000 [BOOT]</span>
-                <span>0x4000 [16K]</span>
-                {mapMode === MEMORY_MAPS.OVERLAP && <span className="text-rose-700">0x7000 [OVERLAP]</span>}
-                <span>0x8000 [32K]</span>
-                <span>0xA000 [40K]</span>
-                <span>0xFFFF [64K TOP]</span>
+                <span>0x0000 [ROM START]</span>
+                <span>0x4000 [RAM START]</span>
+                {mapMode === MEMORY_MAPS.OVERLAP && <span className="text-rose-700">0x7000 [I/O OVERLAP]</span>}
+                <span>0x8000 [I/O START]</span>
+                <span>0xA000 [UNMAPPED]</span>
+                <span>0xFFFF [TOP]</span>
               </div>
 
               {/* Visual Segmented Memory Strip */}
@@ -1193,7 +1272,7 @@ export default function HardwareDecoder() {
                   </span>
                 </div>
 
-                {/* I/O Segment (0x8000 - 0x9FFF, 12.5% default) */}
+                {/* I/O Segment (0x8000 - 0x9FFF, 12.5% in default, or 0x7000-0x9FFF in overlap) */}
                 <div className="w-[12.5%] h-full bg-brand-cream/80 border-r border-white/60 relative flex items-center justify-center group cursor-pointer hover:bg-brand-cream transition-colors">
                   <span className="font-mono text-xs text-brand-deep font-semibold tracking-wider">
                     I/O (8K)
@@ -1207,7 +1286,7 @@ export default function HardwareDecoder() {
                   </span>
                 </div>
 
-                {/* Overlap hatched slice when in Overlap Map Mode */}
+                {/* Overlap hatched slice when in Overlap Map Mode (0x7000 to 0x7FFF) */}
                 {mapMode === MEMORY_MAPS.OVERLAP && (
                   <div
                     className="absolute top-0 bottom-0 z-10 border-x border-dashed border-rose-500/80 pointer-events-none flex items-center justify-center"
@@ -1230,8 +1309,8 @@ export default function HardwareDecoder() {
                     className="absolute top-0 bottom-0 w-1.5 z-20 transition-all duration-300"
                     style={{
                       left: `${pointerPercent}%`,
-                      backgroundColor: decoded.hasOverlapConflict ? '#ef4444' : '#2C1810',
-                      boxShadow: decoded.hasOverlapConflict
+                      backgroundColor: activeResult.error ? '#ef4444' : '#2C1810',
+                      boxShadow: activeResult.error
                         ? '0 0 10px rgba(239,68,68,1)'
                         : '0 0 8px rgba(44,24,16,0.8)',
                     }}
@@ -1246,30 +1325,30 @@ export default function HardwareDecoder() {
                     className="absolute flex items-center gap-1 -translate-x-1/2 font-bold transition-all duration-300"
                     style={{
                       left: `${pointerPercent}%`,
-                      color: decoded.hasOverlapConflict ? '#ef4444' : '#2C1810',
+                      color: activeResult.error ? '#ef4444' : '#2C1810',
                     }}
                   >
                     <span className="material-symbols-outlined text-[14px]">arrow_upward</span>
                     <span>
-                      {decoded.effectiveAddress} (
-                      {decoded.hasOverlapConflict ? 'OVERLAP CONFLICT' : decoded.memoryRegion})
+                      {activeResult.effectiveAddressHex} (
+                      {activeResult.error ? activeResult.error : activeResult.region || 'Accessed'})
                     </span>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* Memory Region Detailed Cards Grid */}
+            {/* Memory Region Detailed Cards Grid (Section 5) */}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
               {/* ROM Block */}
               <div
                 className={`glass-card-inner p-4 rounded-xl flex flex-col justify-between shadow-sm relative overflow-hidden ${
-                  decoded.addressValue !== null && decoded.addressValue <= 0x3fff
-                    ? 'border-2 border-brand-slate bg-white/75'
+                  activeResult.memAccess && activeResult.region === 'ROM'
+                    ? 'border-2 border-brand-slate bg-white/80'
                     : ''
                 }`}
               >
-                {decoded.addressValue !== null && decoded.addressValue <= 0x3fff && (
+                {activeResult.memAccess && activeResult.region === 'ROM' && (
                   <div className="absolute top-0 right-0 px-2.5 py-0.5 bg-brand-dark text-white font-mono text-[9px] font-bold uppercase rounded-bl-lg shadow-sm">
                     ACTIVE TARGET
                   </div>
@@ -1297,26 +1376,22 @@ export default function HardwareDecoder() {
               {/* RAM Block */}
               <div
                 className={`glass-card-inner p-4 rounded-xl flex flex-col justify-between shadow-sm relative overflow-hidden ${
-                  decoded.addressValue !== null &&
-                  decoded.addressValue >= 0x4000 &&
-                  decoded.addressValue <= 0x7fff
-                    ? 'border-2 border-brand-sand bg-white/75'
+                  activeResult.memAccess && activeResult.region === 'RAM'
+                    ? 'border-2 border-brand-sand bg-white/80'
                     : ''
                 }`}
               >
-                {decoded.addressValue !== null &&
-                  decoded.addressValue >= 0x4000 &&
-                  decoded.addressValue <= 0x7fff && (
-                    <div
-                      className={`absolute top-0 right-0 px-2.5 py-0.5 font-mono text-[9px] font-bold uppercase rounded-bl-lg shadow-sm ${
-                        decoded.hasOverlapConflict
-                          ? 'bg-rose-600 text-white'
-                          : 'bg-brand-dark text-white'
-                      }`}
-                    >
-                      {decoded.hasOverlapConflict ? 'OVERLAP CONFLICT' : 'ACTIVE TARGET'}
-                    </div>
-                  )}
+                {activeResult.memAccess && activeResult.region === 'RAM' && (
+                  <div
+                    className={`absolute top-0 right-0 px-2.5 py-0.5 font-mono text-[9px] font-bold uppercase rounded-bl-lg shadow-sm ${
+                      activeResult.error === 'OVERLAP CONFLICT'
+                        ? 'bg-rose-600 text-white'
+                        : 'bg-brand-dark text-white'
+                    }`}
+                  >
+                    {activeResult.error === 'OVERLAP CONFLICT' ? 'OVERLAP CONFLICT' : 'ACTIVE TARGET'}
+                  </div>
+                )}
                 <div>
                   <div className="flex items-center gap-2 pb-1">
                     <span className="font-sans text-xl font-bold text-brand-dark">RAM</span>
@@ -1326,7 +1401,7 @@ export default function HardwareDecoder() {
                     0x4000 – 0x7FFF
                   </div>
                   <div className="font-body text-xs text-brand-deep leading-relaxed">
-                    System memory, program stack frames, dynamic heap, and volatile buffers.
+                    System memory, stack frames, dynamic heap, volatile buffers.
                   </div>
                 </div>
                 <div className="mt-4 pt-2 border-t border-brand-sand/30 flex items-center justify-between">
@@ -1340,39 +1415,29 @@ export default function HardwareDecoder() {
               {/* I/O Block */}
               <div
                 className={`glass-card-inner p-4 rounded-xl flex flex-col justify-between shadow-sm relative overflow-hidden ${
-                  decoded.addressValue !== null &&
-                  ((mapMode === MEMORY_MAPS.DEFAULT &&
-                    decoded.addressValue >= 0x8000 &&
-                    decoded.addressValue <= 0x9fff) ||
-                    (mapMode === MEMORY_MAPS.OVERLAP &&
-                      decoded.addressValue >= 0x7000 &&
-                      decoded.addressValue <= 0x9fff))
-                    ? 'border-2 border-amber-300 bg-white/75'
+                  activeResult.memAccess &&
+                  (activeResult.region === 'I/O' || activeResult.error === 'OVERLAP CONFLICT')
+                    ? 'border-2 border-amber-300 bg-white/80'
                     : ''
                 }`}
               >
-                {decoded.addressValue !== null &&
-                  ((mapMode === MEMORY_MAPS.DEFAULT &&
-                    decoded.addressValue >= 0x8000 &&
-                    decoded.addressValue <= 0x9fff) ||
-                    (mapMode === MEMORY_MAPS.OVERLAP &&
-                      decoded.addressValue >= 0x7000 &&
-                      decoded.addressValue <= 0x9fff)) && (
+                {activeResult.memAccess &&
+                  (activeResult.region === 'I/O' || activeResult.error === 'OVERLAP CONFLICT') && (
                     <div
                       className={`absolute top-0 right-0 px-2.5 py-0.5 font-mono text-[9px] font-bold uppercase rounded-bl-lg shadow-sm ${
-                        decoded.hasOverlapConflict
+                        activeResult.error === 'OVERLAP CONFLICT'
                           ? 'bg-rose-600 text-white'
                           : 'bg-brand-dark text-white'
                       }`}
                     >
-                      {decoded.hasOverlapConflict ? 'OVERLAP CONFLICT' : 'ACTIVE TARGET'}
+                      {activeResult.error === 'OVERLAP CONFLICT' ? 'OVERLAP CONFLICT' : 'ACTIVE TARGET'}
                     </div>
                   )}
                 <div>
                   <div className="flex items-center gap-2 pb-1">
                     <span className="font-sans text-xl font-bold text-brand-dark">I/O SPACE</span>
                     <span className="font-mono text-xs text-brand-taupe font-bold">
-                      {mapMode === MEMORY_MAPS.OVERLAP ? '12 KB' : '8 KB'}
+                      {mapMode === MEMORY_MAPS.OVERLAP ? '12 KB (Overlap)' : '8 KB'}
                     </span>
                   </div>
                   <div className="font-mono text-xs text-brand-deep font-extrabold mb-1">
@@ -1393,8 +1458,8 @@ export default function HardwareDecoder() {
               {/* Unmapped Block */}
               <div
                 className={`glass-card-inner p-4 rounded-xl flex flex-col justify-between shadow-sm opacity-80 ${
-                  decoded.addressValue !== null && decoded.addressValue >= 0xa000
-                    ? 'border-2 border-rose-400 bg-white/75'
+                  activeResult.error === 'UNMAPPED ADDR' || activeResult.error === 'OUT OF RANGE'
+                    ? 'border-2 border-rose-400 bg-white/80'
                     : ''
                 }`}
               >

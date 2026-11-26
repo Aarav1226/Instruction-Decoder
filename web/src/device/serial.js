@@ -1,5 +1,5 @@
 /**
  * ESP32 Hardware Communication Layer (Web Serial API)
- * Mirrors frontend/src/device/serial.js according to DEVICE_GUIDE.md specifications.
+ * Strictly following Section 8 & 9 of DEVICE_GUIDE.md
  */
 export * from '../../../frontend/src/device/serial.js';
