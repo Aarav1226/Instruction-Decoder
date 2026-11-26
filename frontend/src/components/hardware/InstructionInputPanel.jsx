@@ -2,10 +2,11 @@ import { BIT_FIELDS, hexToBinary16 } from './hardwareUtils';
 import './HardwareDecoder.css';
 
 export default function InstructionInputPanel({
-  hexInput,
+  hexInput = '',
   onHexChange,
   onDecode,
   isWaitingReady = false,
+  isReady = false,
 }) {
   const binary16 = hexToBinary16(hexInput);
   const isValidHex = /^[0-9a-fA-F]{4}$/.test(hexInput.trim());
@@ -28,6 +29,12 @@ export default function InstructionInputPanel({
     }
   };
 
+  const decodeBtnLabel = isWaitingReady
+    ? 'Waiting for device...'
+    : isReady
+      ? 'Decode on ESP32'
+      : 'Decode (Software Preview)';
+
   return (
     <section className="hw-card hw-input-panel" aria-label="Instruction Input">
       <div className="hw-card-header">
@@ -35,9 +42,16 @@ export default function InstructionInputPanel({
           <span className="hw-eyebrow">16-Bit Machine Word</span>
           <h3>Instruction Input</h3>
         </div>
-        <span className="hw-mono hw-hex-preview">
-          0x{hexInput.toUpperCase().padEnd(4, '_')}
-        </span>
+        <div className="hw-input-header-badges">
+          {isReady && (
+            <span className="hw-pill hw-pill-ok" title="Hardware link active">
+              ESP32 Ready
+            </span>
+          )}
+          <span className="hw-mono hw-hex-preview">
+            0x{hexInput.toUpperCase().padEnd(4, '_')}
+          </span>
+        </div>
       </div>
 
       <form className="hw-input-form" onSubmit={handleSubmit}>
@@ -57,7 +71,7 @@ export default function InstructionInputPanel({
               onChange={(e) =>
                 onHexChange(e.target.value.replace(/[^0-9a-fA-F]/g, '').toUpperCase())
               }
-              placeholder="1A3F"
+              placeholder="1A73"
               className="hw-hex-input hw-mono"
               spellCheck={false}
               autoComplete="off"
@@ -65,10 +79,11 @@ export default function InstructionInputPanel({
           </div>
           <button
             type="submit"
-            className="hw-btn hw-btn-primary"
+            className={`hw-btn ${isReady ? 'hw-btn-primary' : 'hw-btn-secondary'}`}
             disabled={!isValidHex || isWaitingReady}
+            title={decodeBtnLabel}
           >
-            {isWaitingReady ? 'Connecting...' : 'Decode'}
+            {isWaitingReady ? 'Waiting...' : isReady ? 'Send to ESP32' : 'Decode'}
           </button>
         </div>
       </form>
@@ -94,11 +109,11 @@ export default function InstructionInputPanel({
       <div className="hw-input-actions">
         <button
           type="button"
-          className="hw-btn hw-btn-secondary"
+          className={`hw-btn ${isReady ? 'hw-btn-primary' : 'hw-btn-secondary'}`}
           onClick={handleSubmit}
           disabled={!isValidHex || isWaitingReady}
         >
-          Decode Instruction
+          {decodeBtnLabel}
         </button>
       </div>
     </section>

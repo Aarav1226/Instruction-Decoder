@@ -4,8 +4,8 @@ import './HardwareDecoder.css';
 /* ── ConnectionPanel ────────────────────────────────────────────────────── */
 
 export default function ConnectionPanel({
-  connectionState,
-  isWaitingReady,
+  connectionState = CONNECTION_STATES.DISCONNECTED,
+  isWaitingReady = false,
   onConnectToggle,
 }) {
   const isConnected = connectionState === CONNECTION_STATES.CONNECTED;
@@ -22,7 +22,7 @@ export default function ConnectionPanel({
         </div>
         <span className={badgeClass}>
           <span className="hw-badge-dot" aria-hidden="true" />
-          {connectionState}
+          {isWaitingReady ? 'Waiting for Ready' : connectionState}
         </span>
       </div>
 
@@ -35,39 +35,59 @@ export default function ConnectionPanel({
           <span className="hw-meta-label">Serial Config</span>
           <span className="hw-meta-value hw-mono">USB Serial · 115200 baud</span>
         </div>
-        {isWaitingReady && (
-          <div className="hw-meta-item">
-            <span className="hw-meta-label">Connection</span>
-            <span className="hw-meta-value">Waiting for device ready</span>
-          </div>
-        )}
+        <div className="hw-meta-item">
+          <span className="hw-meta-label">Protocol</span>
+          <span className="hw-meta-value hw-mono">JSON Line Stream (JSON:...)</span>
+        </div>
+        <div className="hw-meta-item">
+          <span className="hw-meta-label">Hardware State</span>
+          <span className="hw-meta-value">
+            {isConnected
+              ? 'Online & Ready'
+              : isWaitingReady
+                ? 'Awaiting Boot Handshake'
+                : isError
+                  ? 'Connection Error'
+                  : 'Idle / Disconnected'}
+          </span>
+        </div>
       </div>
 
       {isWaitingReady && (
         <div className="hw-ready-banner" role="status">
           <span className="hw-pulse-dot" aria-hidden="true" />
-          <span>Waiting for ESP32 device-ready handshake...</span>
+          <span>Port opened at 115200 baud. Waiting for ESP32 ready handshake...</span>
         </div>
       )}
 
       <div className="hw-connection-actions">
         <button
           type="button"
-          className={`hw-btn ${isConnected ? 'hw-btn-secondary' : 'hw-btn-primary'} ${isError ? 'hw-btn-error' : ''}`}
+          className={`hw-btn ${
+            isConnected
+              ? 'hw-btn-secondary'
+              : isError
+                ? 'hw-btn-error'
+                : isWaitingReady
+                  ? 'hw-btn-secondary'
+                  : 'hw-btn-primary'
+          }`}
           onClick={onConnectToggle}
-          disabled={isConnecting || isError}
+          disabled={isConnecting && !isWaitingReady}
         >
-          {isConnecting
-            ? 'Connecting...'
-            : isError
-              ? 'Error — Retry Connection'
-              : isConnected
-                ? 'Disconnect USB Device'
-                : 'Connect USB Device'}
+          {isWaitingReady
+            ? 'Cancel Connection'
+            : isConnecting
+              ? 'Connecting...'
+              : isError
+                ? 'Error — Retry Connection'
+                : isConnected
+                  ? 'Disconnect USB Device'
+                  : 'Connect USB Device'}
         </button>
         <p className="hw-browser-note">
-          Requires <strong>Chrome</strong> or <strong>Edge</strong> (desktop) with{' '}
-          <code>Web Serial API</code> enabled.
+          Requires <strong>Google Chrome</strong> or <strong>Microsoft Edge</strong> (desktop) with{' '}
+          <code>Web Serial API</code> enabled. Ensure the Arduino Serial Monitor is closed before connecting.
         </p>
       </div>
     </section>

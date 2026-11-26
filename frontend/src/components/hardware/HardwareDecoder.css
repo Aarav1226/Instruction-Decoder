@@ -100,6 +100,22 @@
   opacity: 0.9;
 }
 
+.hw-btn-error {
+  background: #ef4444;
+  color: #fff;
+  border-color: #dc2626;
+}
+
+.hw-btn-error:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+.hw-input-header-badges {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .hw-btn-secondary {
   background: var(--code-bg);
   color: var(--text-h);
